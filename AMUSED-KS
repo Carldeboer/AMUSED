@@ -1,0 +1,168 @@
+#!/usr/bin/ruby
+require "MATHS.rb"
+require "DNATOOLBOX.rb"
+require "UTILS.rb";
+require "SWITCHES.rb"
+NUMARGV=4;
+if ARGV.length()<NUMARGV  || ARGV[0]=~/^--?[h?]/
+	print("Usage: kMerScanKS -q <inFPQuery>  -o <outFP> [-r <randomizeNMer>] [-s <maxTreeSize>]\n");
+	print("  -q <inFPQuery> = query sequences\n");
+	print("  -o <outFP> = output file\n");
+	#print("ONLY 1 IMP  -r <randomizeNMer> = compare to background (binomial) created by permuting input in <randomizeNMer> chunks [default=1], ignored if -b used\n");
+	print("  -s <maxTreeSize> = max n-mer to consider [default=6]\n");
+	print("  -m <smoothBy> = smooth data over how many bases [default=5]\n");
+	exit;
+end
+
+#maxTreeSize=5;
+switches = parseSwitches(ARGV,{"s"=>1,'o'=>1,'q'=>1,'m'=>1});
+switches=getDefaults(switches,{"s"=>6,"m"=>5});
+maxTreeSize=switches['s'].to_f();
+smoothBy=switches["m"].to_i();
+seqInFP = switches['q'];
+outFP = switches['o'];
+#randomizeNMer = switches['r'].to_i();
+
+alphabet = ["A","T","G","C"];
+
+
+def enumerateKMers(alphabet,k)
+	return [""] if k==0;
+	allKMers=[]
+	kMers = enumerateKMers(alphabet,(k-1));
+	kMers.each(){|mer|
+		alphabet.each(){|b|
+			allKMers.push(mer+b);
+		}
+	}
+	return allKMers;
+end
+
+def enumerateAllKMers(alphabet,k)
+	allKMers=[];
+	1.upto(k){|i|
+		allKMers+=enumerateKMers(alphabet,i);
+	}
+	return allKMers;
+end
+
+
+#p(enumerateAllKMers(alphabet, maxTreeSize));
+
+seqHashes=nil;
+theLen=nil;
+seqTotLen=0;
+seqCount = 0;
+File.foreach(seqInFP){|line|
+	if line==""||line==nil|| line[0,1]==">"
+		next;
+	end
+	curSeq  = line.chomp();
+	if seqHashes.nil?
+		theLen=curSeq.length();
+		seqHashes=Hash.new();
+		enumerateAllKMers(alphabet, maxTreeSize).each{|mer| seqHashes[mer]=[0]*theLen};
+	end
+	raise('Not all sequences are the same length!') if curSeq.length()!=theLen;
+
+	1.upto(maxTreeSize){|i|
+		0.upto(theLen-1){|j|
+			seqHashes[curSeq[j,i]][j]+=1;
+		}
+	}
+	seqCount+=1;
+}
+print("Input All Data, All Hashes Built.  Buiding weight matrix and expectation\n");
+
+bgMatrix = Hash.new();
+alphabet.each(){|b|
+	bgMatrix[b]=seqHashes[b].dup();
+	bgMatrix[b].map!(){|e| e.to_f()/seqCount};
+	bgMatrix[b]+=[bgMatrix[b][bgMatrix.length()-1]]*(maxTreeSize-1);
+}
+
+#smooth bgMatrix
+if smoothBy>1
+	alphabet.each(){|b|
+		bgMatrix[b] = smooth(bgMatrix[b], smoothBy);
+	}
+	#renormalize;
+	totals=[0.0]*(theLen+maxTreeSize-1);
+	alphabet.each(){|b|
+		if totals.length()!=bgMatrix[b].length()
+			raise("Error! #{totals.length()}!=#{bgMatrix[b].length()}");
+		end
+		0.upto(bgMatrix[b].length()-1){|i|
+			totals[i]+=bgMatrix[b][i];
+		}
+	}
+	alphabet.each(){|b|
+		0.upto(bgMatrix[b].length()-1){|i|
+			bgMatrix[b][i]=bgMatrix[b][i]/totals[i];
+		}
+	}
+end
+#
+#
+
+expectation = Hash.new();
+cdf = Hash.new();
+counts = Hash.new();
+seqHashes.keys.each{|k|
+	cdf[k]=[0.0]*theLen;
+	cdf[k][0]+=seqHashes[k][1].to_f();
+	1.upto(theLen-1){|i|
+		cdf[k][i]+=cdf[k][i-1]+seqHashes[k][i];
+	}
+	counts[k]=cdf[k][theLen-1];
+	if cdf[k][theLen-1]==0
+		0.upto(theLen-1){|i|
+			cdf[k][i]=i;
+		}
+	end
+	cdf[k].map!(){|e|  e/cdf[k][theLen-1]; };
+
+	curF=[1.0]*theLen; #calculate frequencies expected by BG
+	0.upto(theLen-1){|i|
+		0.upto(k.length()-1){|j|
+			curF[i]=curF[i]*bgMatrix[k[j,1]][i+j];
+		}
+	}
+	#turn into CDF
+	expectation[k]=[0.0]*theLen;
+	1.upto(theLen-1){|i|
+		expectation[k][i]+=expectation[k][i-1]+curF[i];
+	}
+	expectation[k].map!(){|e| e/expectation[k][theLen-1]};
+}
+
+
+
+print("Performing K-S tests:\n");
+allData = [];
+seqHashes.keys.each{|k|
+	totDiff=0.0;
+	maxDiff=0.0;
+	1.upto(theLen-1){|i|
+		curDiff =(cdf[k][i]-expectation[k][i]).abs();
+		totDiff+=curDiff;
+		maxDiff=[maxDiff,curDiff].max();
+	}
+	count=counts[k];
+	allData.push([k,totDiff,maxDiff,count,Math.sqrt(count)*maxDiff]);
+}
+
+print("Sorting results...\n");
+allData.sort!(){|a,b|
+	b[4]<=>a[4];
+}
+
+print("Printing results...\n");
+outFile=File.open(outFP,"w");
+outFile.print("totDiff\tD\tcount\tK\n");
+0.upto(allData.length()-1){|i|
+	outFile.print(allData[i].map(){|e| e.to_s()}.join("\t")+"\n");
+	#outFile.print("#{k}\t#{totDiff}\t#{maxDiff}\t#{count}\t#{Math.sqrt(count)*maxDiff}\n");
+}
+outFile.close();
+print("Done!\n");
