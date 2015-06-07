@@ -1,0 +1,457 @@
+#!/usr/bin/ruby
+require "NMERTREE.rb"
+require "DNATOOLBOX.rb"
+require "UTILS.rb";
+require "SWITCHES.rb"
+
+NUMARGV=4;
+if ARGV.length()<NUMARGV  || ARGV[0]=~/^--?[h?]/ #TODO: clean
+	print("Usage: AMUSED -q <inFPQuery>  -o <outFP> [-b <inFPBG> | -r <randomizeNMer>] [-s <maxTreeSize>]\n");
+	print("  -q <inFPQuery> = query sequences\n");
+	print("  -b <inFPBG> = compare seqs to these background seqs\n");
+	print("  -bp <bgPseudo> = pseudocount to add to background [default=0.5]\n");
+	print("  -o <outFP> = output file\n");
+	print("  -t <numThreads> = number of CPU threads to use [default=1]\n");
+	print("  -s <maxTreeSize> = max n-mer to consider [default=8]\n");
+	print("  -z <subZCutoff> = minimum absolute Sub-Z-score [default = 0; print all]\n");
+	print("  -ng = no inserting gaps\n");
+	print("  -1p = sequences not in fasta format: each line is a full sequence\n");
+	print("  -ds = double stranded (reverse complement sequences too)\n");
+	print("  -nsz = don't calculate super Zs\n");
+	exit;
+end
+
+switches = parseSwitches(ARGV,{"s"=>1,'z'=>1,'o'=>1,'q'=>1,'b'=>1,'ds'=>1,'bp'=>1,'nsz'=>0,'ng'=>0,'t'=>1, '1p'=>0});
+switches=getDefaults(switches,{"s"=>8,'z'=>0,'bp'=>'0.5','t'=>"1"});
+numThreads = switches['t'].to_i();
+maxTreeSize=switches['s'].to_f();
+bgPhi = switches['bp'].to_f();
+seqInFP = switches['q'];
+bgInFP = switches['b'];
+useBG = !bgInFP.nil?;
+addGaps = switches['ng'].nil?;
+isFasta = switches['1p'].nil?;
+outFP = switches['o'];
+doubleStranded=!switches['ds'].nil?
+superZ=switches['nsz'].nil?();
+minSubZ = switches['z'].to_i();
+if superZ
+	superZ=1;
+else
+	superZ=0;
+end
+#initialize background
+if useBG
+	print("Scanning background sequences\n");
+	bgTree =NMerTree.new(maxTreeSize+superZ);
+	bgTotLen=0;
+	bgCount  =0;
+	t1 = Thread.new{
+	File.foreach(bgInFP){|line|
+		if line==""||line==nil || line[0,1]==">"
+			next;
+		end
+	
+		curSeq  = line.chomp();
+		bgTree.traverse(curSeq); # traverse the current sequence
+		bgTree.traverse(revcomp(curSeq)) if doubleStranded;
+		bgTotLen+=curSeq.length
+		bgCount+=1;
+	}
+	}
+	if (numThreads==1)
+		t1.join();
+	end
+end
+
+#initialize foreground
+print("Scanning foreground sequences\n");
+seqTree =NMerTree.new(maxTreeSize+superZ);
+seqTotLen=0;
+seqCount = 0;
+File.foreach(seqInFP){|line|
+	if line==""||line==nil|| line[0,1]==">"
+		next;
+	end
+	curSeq  = line.chomp();
+	seqTree.traverse(curSeq); #scan the current sequence
+	seqTree.traverse(revcomp(curSeq)) if doubleStranded;
+	seqTotLen+=curSeq.length
+	seqCount+=1;
+}
+if useBG
+	t1.join()
+end
+
+print("Input All Data, All Trees Built.\n");
+alphabet = ["A","T","G","C"];
+alphabetGaps = ["A","T","G","C","-"];
+alphanum=Hash.new();
+0.upto(alphabet.length()-1){|i|
+	alphanum[alphabet[i]]=i;
+}
+
+headerI = 0;
+I_K = 0; I_SEQ = 1; I_RC = 2; I_NumFG=3; I_SizeFG=4; I_PctFG=5; I_SubEnrFG=6; I_SubDeplFG=7; I_SubZFG=8; 
+headerI=9;
+header=[];
+header.push("k","kMer", "kMerRC", "NumFG", "SizeFG","PctFG"); #general headers
+header.push("SubEnrFG","SubDeplFG","SubZFG"); # Z-score 
+if useBG
+	I_NumBG= headerI+0; I_SizeBG = headerI+1; I_PctBG = headerI+2; I_SubEnrBG = headerI+3; I_SubDeplBG = headerI+4; I_SubZBG = headerI+5; I_SubEnrNorm=headerI+6; I_SubDeplNorm = headerI+7; I_SubZNorm = headerI + 8; headerI = headerI+9;
+	header.push("NumBG","SizeBG","PctBG","SubEnrBG","SubDeplBG","SubZBG", "SubEnrNorm","SubDeplNorm","SubZNorm"); # with background
+end
+if superZ==1
+	I_SuperZFG = headerI+0; I_ZDiffFG = headerI+1; headerI+=2;
+	header.push("SuperZFG","ZDiffFG"); # super Z scores
+	if useBG
+		I_SuperZBG = headerI+0; I_SuperZNorm = headerI+1; I_ZNormDiff = headerI+2; headerI+=3
+		header.push("SuperZBG","SuperZNorm","ZNormDiff"); #With background
+	end
+end
+NUMFIELDS=headerI;
+dataPositions = Hash.new();
+0.upto(header.length()-1){|i|
+	dataPositions[header[i]]=i;
+}
+
+
+#print("Calculating base content \n");
+ntContent=seqTree.getAllNMers(1,alphabet);
+if doubleStranded
+	seqTotLen+=seqTotLen;
+	bgTotLen+=bgTotLen if useBG;
+end
+ntHash=Hash.new();
+ntContent.each{|b,n|
+	ntHash[b]=(0.0+n)/seqTotLen;
+}
+if superZ==1 && useBG
+	ntContentBG=bgTree.getAllNMers(1,alphabet);
+	ntHashBG=Hash.new();
+	ntContentBG.each{|b,n|
+		ntHashBG[b]=(0.0+n)/bgTotLen;
+	}
+end
+allKMerTotalsFG=[];
+allKMerTotalsBG=[] if useBG;
+
+#print("Calculating K and N \n"); 
+1.upto(maxTreeSize+superZ){|k|
+	allKMerTotalsFG[k] = seqTotLen-(seqCount*(k-1)); # total num k-mers in sequence
+	if useBG
+		allKMerTotalsBG[k] = bgTotLen-(bgCount*(k-1)); # total num k-mers in background
+	end
+}
+
+#TODO: instead of revcomping and traversing the sequnces twice, it would be marginally more efficient to combine redundant nodes in the tree post traversal
+#require "profile"
+require "benchmark"
+puts Benchmark.measure(){
+if addGaps
+	print("Adding gaps...\n");
+	#puts Benchmark.measure(){
+	seqTree.addGaps(numThreads);
+	if useBG
+		bgTree.addGaps(numThreads);
+	end
+	#} #Benchmark
+end
+#puts sprintf("seqTree.getThisMer(-A) = %i",seqTree.getThisMer("-A"))
+#puts sprintf("seqTree.getThisMer(--A) = %i",seqTree.getThisMer("--A"))
+#puts sprintf("seqTree.getThisMer(-A-) = %i",seqTree.getThisMer("-A-"))
+#puts sprintf("seqTree.getThisMer(A--) = %i",seqTree.getThisMer("A--"))
+#puts sprintf("seqTree.getThisMer(A-) = %i",seqTree.getThisMer("A-"))
+#puts sprintf("seqTree.getThisMer(AAA-A) = %i",seqTree.getThisMer("AAA-A"))
+#puts sprintf("seqTree.getThisMer(AA--A) = %i",seqTree.getThisMer("AA--A"))
+#puts sprintf("seqTree.getThisMer(AAAA) = %i",seqTree.getThisMer("AAAA"))
+#puts sprintf("seqTree.getThisMer(AAAAA) = %i",seqTree.getThisMer("AAAAA"))
+#puts seqTree.toString()
+print("Calculating statistics... \n");
+#puts Benchmark.measure(){
+allData = [];
+indexHash={};
+nextI=0;
+refNum=0;
+if addGaps
+	possibleLetters = alphabetGaps;
+else
+	possibleLetters = alphabet;
+end
+2.upto(maxTreeSize){|k|
+	curFGDist = seqTree.getAllNMers(k,possibleLetters);
+	kMersTotalFG = allKMerTotalsFG[k]; # the total numer of k-mers in FG
+	if useBG
+		curBGDist=bgTree.getAllNMers(k,possibleLetters);
+		kMersTotalBG = allKMerTotalsBG[k]; # the total number of k-mers in BG
+		raise("The number of query and background #{k}-mers are different: #{curFGDist.length()} #{curBGDist.length()}") if curFGDist.length()!=curBGDist.length();
+	end
+	#printf("k = %d\n",k);
+	0.upto(curFGDist.length-1){|i| # for each k-mer, i
+			seqNMer, seqHits = curFGDist[i];
+		if seqNMer[0,1]=="-" || seqNMer[-1,1]=="-"
+			next;
+		end
+		curKMerData=[];
+		curKMerData[I_K]=k;
+		curKMerData[I_SEQ]=seqNMer;
+		curKMerData[I_RC]=revcomp(seqNMer)
+		curKMerData[I_NumFG]=seqHits;
+		curKMerData[I_SizeFG]=allKMerTotalsFG[k]
+		curKMerData[I_PctFG]=(100.0*seqHits)/allKMerTotalsFG[k];
+		refNum+=1;
+		n1=seqNMer[0,1]; #first nucleotide
+		n2=seqNMer[-1,1]; #last nucle
+		s1=seqNMer[1,k-1]; #suffix (k-1)-mer sub-motif
+		s2=seqNMer[0,k-1]; #prefix (k-1)-mer sub-motif
+		subLenCorrFG1 = 1.0 * kMersTotalFG/allKMerTotalsFG[k-1]
+		subLenCorrFG2 = 1.0 * kMersTotalFG/allKMerTotalsFG[k-1]
+		e1=ntHash[n1]*seqTree.getThisMer(s1);#expected frequency of cur k-mer, given s1 frequency and n1
+		e2=ntHash[n2]*seqTree.getThisMer(s2);# expected frequency of cur k-mer, given s2 frequency and n2
+		eMax=[e1*subLenCorrFG1,e2*subLenCorrFG2].max(); # compare to max if enriched, as count
+		dMin=[e1*subLenCorrFG1,e2*subLenCorrFG2].min(); # compare to min if depleted, as count
+		if eMax==0 # (k-1)-mers do not occur
+			curKMerData[I_SubEnrFG]=1.0;
+		else
+			curKMerData[I_SubEnrFG]=(0.0+seqHits)/eMax; #enrichment ratio
+		end
+		if dMin==0 # (k-1)-mers do not occur; in this case the k-mer is not any more depleted than we expect
+			curKMerData[I_SubDeplFG]=1.0;
+		else
+			curKMerData[I_SubDeplFG]=(0.0+seqHits)/dMin; # depletion ratio
+		end
+		if seqHits>eMax # k-mer is enriched relative to enrichment sub-motif
+			expected=eMax;
+		elsif seqHits<dMin # k-mer is depleted relative to sub-motif
+			expected=dMin;
+		else #neither enriched nor depleted
+			expected=seqHits;
+		end
+		justZScore=0.0;
+		if expected!=0
+			justZScore=(0.0+seqHits-expected)/(Math.sqrt(expected));
+		end
+		if false && s1=~/^[A-]*$/ && s2=~/^[-A]*$/
+			puts sprintf("seqNMer = %s, s1 = %s, s2 = %s", seqNMer, s1, s2);
+			puts sprintf("seqTree.getThisMer(seqNMer) = %i; seqHits=%i",seqTree.getThisMer(seqNMer),seqHits);
+			puts sprintf("seqTree.getThisMer(s1) = %i, seqTree.getThisMer(s2) = %i", seqTree.getThisMer(s1), seqTree.getThisMer(s2));
+			puts sprintf("expected = %f, eMax = %f, dMin = %f", expected, eMax, dMin);
+			puts sprintf("");
+		end
+		curKMerData[I_SubZFG]=justZScore;
+		if useBG # calculate normalized z score {
+			subLenCorrBG1 = 1.0 ;
+			subLenCorrBG2 = 1.0 ;
+			(k).downto(s1.length()+1){|kS|
+				subLenCorrBG1=subLenCorrBG1*allKMerTotalsBG[kS]/allKMerTotalsBG[kS-1];
+			}
+			(k).downto(s2.length()+1){|kS|
+				subLenCorrBG2=subLenCorrBG2*allKMerTotalsBG[kS]/allKMerTotalsBG[kS-1];
+			}
+			bgNMer, bgHits = curBGDist[i];
+			e1b=ntHash[n1]*bgTree.getThisMer(s1);#expected freq of (k-1)-mer in BG, using sub-motif s1
+			e2b=ntHash[n2]*bgTree.getThisMer(s2);# same for s2
+			raise("bgNMer and seqNMer are not the same! "+bgNMer+" "+seqNMer+" i="+i.to_s()) if bgNMer!=seqNMer;
+			curKMerData[I_NumBG]=bgHits;
+			curKMerData[I_PctBG]=(100.0*bgHits)/allKMerTotalsBG[k];
+			curKMerData[I_SizeBG]=allKMerTotalsBG[k];
+			eMaxb=[e1b*subLenCorrBG1,e2b*subLenCorrBG2].max(); # expected count in background, if submotifs enriched
+			dMinb=[e1b*subLenCorrBG1,e2b*subLenCorrBG2].min(); # expected count in background, if submotifs depleted
+			if eMaxb==0
+				curKMerData[I_SubEnrBG]=1.0;
+			else
+				curKMerData[I_SubEnrBG]=((0.0+bgHits)/eMaxb); 
+			end
+			if dMinb==0
+				curKMerData[I_SubDeplBG]=1.0;
+			else
+				curKMerData[I_SubDeplBG]=((0.0+bgHits)/dMinb);
+			end
+			if bgHits>eMaxb #k-mer enriched in BG
+				expectedB=eMaxb;
+			elsif bgHits<dMinb #k-mer depleted in BG
+				expectedB=dMinb;
+			else
+				expectedB=bgHits;
+			end
+			if expectedB==0
+				curKMerData[I_SubZBG]=(0.0);
+			else
+				curKMerData[I_SubZBG]=((0.0+bgHits-expectedB)/Math.sqrt(expectedB));
+			end
+			if eMax==0 
+				if seqHits!=0
+					raise("Expected-enr is 0, but actual is not in FG: "+seqNMer);
+				end
+				curKMerData[I_SubEnrNorm]=(0.0); 
+			else
+				curKMerData[I_SubEnrNorm]=(((0.0+seqHits)/eMax)/((0.0+bgHits+bgPhi)/(eMaxb+bgPhi))); # ratio of ratios
+			end
+			if dMin==0 
+				if seqHits!=0
+					puts 
+					raise("Expected-depl is 0, but actual is not in FG: "+seqNMer);
+				end
+				# if there were no hits expected in the FG, the BG, or the BG had no hits this will be undef (/0 error)
+				curKMerData[I_SubDeplNorm]=(0.0); 
+			else
+				curKMerData[I_SubDeplNorm]=(((0.0+seqHits)/dMin)/((0.0+bgHits+bgPhi)/(dMinb+bgPhi)));
+			end
+			
+			if expected==0 # FG k-mer was expected 0 times
+				normZScore=0.0; # numerator is undef (0/0)
+			else
+				if expected>expectedB
+					denom = Math.sqrt(expectedB);
+					scaleFG=expectedB/expected;
+					scaleBG=1;
+				else
+					denom = Math.sqrt(expected);
+					scaleFG=1;
+					scaleBG=expected/expectedB;
+				end
+				denom=1 if denom==0;
+				normZScore=((0.0+seqHits-expected)*scaleFG-((0.0+bgHits-expectedB)*scaleBG))/(denom); 
+			end
+			curKMerData[I_SubZNorm]=(normZScore);
+		end #}
+		if superZ==1 #{
+			supZmax=0.0;
+			supZmin=0.0;
+			if seqHits==0 # if no instances of this motif, there can be no super motifs
+				curKMerData[I_SuperZFG]=0.0;
+			else
+				alphabet.each{|b| 
+					curExp=(0.0+seqHits)*ntHash[b]; #calculate most enriched and most depleted (k+1)-mer Z score given k-mer
+					if curExp>0
+						supZmax=[supZmax, (0.0+seqTree.getThisMer(seqNMer+b)-curExp)/Math.sqrt(curExp),(0.0+seqTree.getThisMer(b+seqNMer)-curExp)/Math.sqrt(curExp)].max();
+						supZmin=[supZmin, (0.0+seqTree.getThisMer(seqNMer+b)-curExp)/Math.sqrt(curExp),(0.0+seqTree.getThisMer(b+seqNMer)-curExp)/Math.sqrt(curExp)].min();
+					end
+				}
+				if justZScore>0 # if k-mer is enriched
+					curKMerData[I_SuperZFG]=(supZmax); #use enrichment
+				elsif justZScore<0 # if k-mer depleted
+					curKMerData[I_SuperZFG]=(supZmin); # use depletion
+				else # neither enriched nor depleted.
+					curKMerData[I_SuperZFG]=0.0;
+				end
+			end
+			curKMerData[I_ZDiffFG]= (curKMerData[I_SubZFG]).abs()-(curKMerData[I_SuperZFG]).abs();
+			if useBG #superZ with background {
+				if bgHits==0 #{
+					curKMerData[I_SuperZBG]=0.0;
+				else #}{
+					supZmax=0.0;
+					supZmin=0.0;
+					alphabet.each{|b| #calc BG super Z
+						curExp=(0.0+bgHits)*ntHashBG[b];
+						if curExp>0
+							supZmax=[supZmax, (0.0+bgTree.getThisMer(seqNMer+b)-curExp)/Math.sqrt(curExp),(0.0+bgTree.getThisMer(b+seqNMer)-curExp)/Math.sqrt(curExp)].max();
+							supZmin=[supZmin, (0.0+bgTree.getThisMer(seqNMer+b)-curExp)/Math.sqrt(curExp),(0.0+bgTree.getThisMer(b+seqNMer)-curExp)/Math.sqrt(curExp)].min();
+						end
+					}
+					if justZScore>0 # k-mer in FG is enriched
+						curKMerData[I_SuperZBG] = (supZmax);
+					elsif justZScore<0 #depleted
+						curKMerData[I_SuperZBG] = (supZmin);
+					else # neither enriched nor depleted.
+						curKMerData[I_SuperZBG] = 0.0;
+					end
+				end #}
+				if seqHits==0 #no hits in the FG {
+					curKMerData[I_SuperZNorm] = 0.0; # because we expect no supermotifs containing this motif in FG.
+				elsif bgHits==0 # no hits in BG #}{
+					curKMerData[I_SuperZNorm] = 0.0; # because we expect no supermotifs containing this motif in BG - nothing to compare to.
+				else #}{
+					supZmax=0.0;
+					supZmin=0.0;
+					alphabet.each{|b|
+						curExpBG=(0.0+bgHits)*ntHashBG[b];
+						curExpSeq=(0.0+seqHits)*ntHash[b];
+						if curExpBG!=0 && curExpSeq!=0 # if either is 0, there is a 0 in the %nt hash, so skip it #{
+							if curExpBG>curExpSeq
+								scaleBG= curExpSeq/curExpBG;
+								scaleFG = 1;
+								denom = Math.sqrt(curExpSeq);
+							else
+								scaleBG= 1; #cbg
+								scaleFG = curExpBG/curExpSeq; #cq
+								denom = Math.sqrt(curExpBG); 
+							end
+							denom=1.0 if denom==0;
+							#((Oq-Eq)*cq-(Obg-Ebg)*cbg)/sqrt(min(Eq,Ebg))
+							#begin
+							supZmax=[supZmax, ((0.0+seqTree.getThisMer(seqNMer+b)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(seqNMer+b)-curExpBG)*scaleBG)/denom,((0.0+seqTree.getThisMer(b+seqNMer)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(b+seqNMer)-curExpBG)*scaleBG)/denom].max();
+							supZmin=[supZmin, ((0.0+seqTree.getThisMer(seqNMer+b)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(seqNMer+b)-curExpBG)*scaleBG)/denom,((0.0+seqTree.getThisMer(b+seqNMer)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(b+seqNMer)-curExpBG)*scaleBG)/denom].min();
+#							rescue Exception => e
+#								puts denom
+#								puts scaleFG
+#								puts scaleBG
+#								puts scaleFG;
+#								puts curExpBG;
+#								puts ((0.0+seqTree.getThisMer(seqNMer+b)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(seqNMer+b)-curExpBG)*scaleBG)/denom;
+#								puts ((0.0+seqTree.getThisMer(b+seqNMer)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(b+seqNMer)-curExpBG)*scaleBG)/denom;
+#								puts e
+#								exit()
+#							end
+						end #}
+					}
+					if normZScore>0 # if normalized Z score is enriched
+						curKMerData[I_SuperZNorm] = (supZmax);
+					elsif normZScore<0 # if normalized Z-score is depleted
+						curKMerData[I_SuperZNorm] = (supZmin);
+					else # neither enriched nor depleted.
+						curKMerData[I_SuperZNorm] = 0.0
+					end
+				end #}
+			end #}
+			curKMerData[I_ZNormDiff]=(curKMerData[I_SubZNorm]).abs()-(curKMerData[I_SuperZNorm]).abs()
+		end #}
+		allData.push(curKMerData);
+	}
+	curFGDist=nil;#garbage
+}
+} #Benchmark
+print("Sorting results...\n");
+if superZ==1 # sort using superZ and BG
+	#print("Sorting results by superZ...\n");
+	kPos = dataPositions["k"];#no BG
+	sortBy = I_SubZFG;#no BG
+	filterBy = I_ZDiffFG;
+	if useBG #
+		#print("Sorting results by superZ and BG...\n");
+		sortBy = I_SubZNorm;
+		filterBy = I_ZNormDiff;
+	end
+	allData.sort!(){|a,b|
+		case 
+		when a[filterBy]>0 && b[filterBy]<=0 && b[I_K]<maxTreeSize 
+			-1
+		when a[filterBy]<=0 && a[I_K]<maxTreeSize && b[filterBy]>0 
+			1
+		else
+			b[sortBy].abs() <=> a[sortBy].abs();
+		end
+	};
+else #no superZ
+	#sort by SubZ 
+	sortBy = I_SubZFG;#no BG
+	if useBG #BG
+		sortBy = I_SubZNorm;#no BG
+	end
+	allData.sort!(){|a,b|
+		b[sortBy].abs()<=>a[sortBy].abs()
+	};
+end
+
+print("Printing results...\n");
+outFile = File.open(outFP, "w");
+outFile.print(header.join("\t")+"\n");
+0.upto(allData.length-1){|i|
+	curEntry = allData[i]
+	curEntry.map!{|e| e.to_s};
+	outFile.print(curEntry.join("\t")+"\n");
+	outFile.flush();
+}
+print("All Done!\n");
+outFile.close();
