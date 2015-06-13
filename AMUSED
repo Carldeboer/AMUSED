@@ -4,6 +4,13 @@ require "DNATOOLBOX.rb"
 require "UTILS.rb";
 require "SWITCHES.rb"
 
+GOOGLE_HASH=false;
+begin
+	require 'google_hash'
+	GOOGLE_HASH=true;
+	puts "Using google hash...";
+rescue LoadError
+end
 NUMARGV=4;
 if ARGV.length()<NUMARGV  || ARGV[0]=~/^--?[h?]/ #TODO: clean
 	print("Usage: AMUSED -q <inFPQuery>  -o <outFP> [-b <inFPBG> | -r <randomizeNMer>] [-s <maxTreeSize>]\n");
@@ -11,26 +18,22 @@ if ARGV.length()<NUMARGV  || ARGV[0]=~/^--?[h?]/ #TODO: clean
 	print("  -b <inFPBG> = compare seqs to these background seqs\n");
 	print("  -bp <bgPseudo> = pseudocount to add to background [default=0.5]\n");
 	print("  -o <outFP> = output file\n");
-	print("  -t <numThreads> = number of CPU threads to use [default=1]\n");
 	print("  -s <maxTreeSize> = max n-mer to consider [default=8]\n");
 	print("  -z <subZCutoff> = minimum absolute Sub-Z-score [default = 0; print all]\n");
 	print("  -ng = no inserting gaps\n");
-	print("  -1p = sequences not in fasta format: each line is a full sequence\n");
 	print("  -ds = double stranded (reverse complement sequences too)\n");
 	print("  -nsz = don't calculate super Zs\n");
 	exit;
 end
 
-switches = parseSwitches(ARGV,{"s"=>1,'z'=>1,'o'=>1,'q'=>1,'b'=>1,'ds'=>1,'bp'=>1,'nsz'=>0,'ng'=>0,'t'=>1, '1p'=>0});
-switches=getDefaults(switches,{"s"=>8,'z'=>0,'bp'=>'0.5','t'=>"1"});
-numThreads = switches['t'].to_i();
+switches = parseSwitches(ARGV,{"s"=>1,'z'=>1,'o'=>1,'q'=>1,'b'=>1,'ds'=>1,'bp'=>1,'nsz'=>0,'ng'=>0});
+switches=getDefaults(switches,{"s"=>8,'z'=>0,'bp'=>'0.5'});
 maxTreeSize=switches['s'].to_f();
 bgPhi = switches['bp'].to_f();
 seqInFP = switches['q'];
 bgInFP = switches['b'];
 useBG = !bgInFP.nil?;
 addGaps = switches['ng'].nil?;
-isFasta = switches['1p'].nil?;
 outFP = switches['o'];
 doubleStranded=!switches['ds'].nil?
 superZ=switches['nsz'].nil?();
@@ -46,7 +49,6 @@ if useBG
 	bgTree =NMerTree.new(maxTreeSize+superZ);
 	bgTotLen=0;
 	bgCount  =0;
-	t1 = Thread.new{
 	File.foreach(bgInFP){|line|
 		if line==""||line==nil || line[0,1]==">"
 			next;
@@ -58,10 +60,6 @@ if useBG
 		bgTotLen+=curSeq.length
 		bgCount+=1;
 	}
-	}
-	if (numThreads==1)
-		t1.join();
-	end
 end
 
 #initialize foreground
@@ -79,13 +77,9 @@ File.foreach(seqInFP){|line|
 	seqTotLen+=curSeq.length
 	seqCount+=1;
 }
-if useBG
-	t1.join()
-end
 
 print("Input All Data, All Trees Built.\n");
 alphabet = ["A","T","G","C"];
-alphabetGaps = ["A","T","G","C","-"];
 alphanum=Hash.new();
 0.upto(alphabet.length()-1){|i|
 	alphanum[alphabet[i]]=i;
@@ -145,55 +139,123 @@ allKMerTotalsBG=[] if useBG;
 }
 
 #TODO: instead of revcomping and traversing the sequnces twice, it would be marginally more efficient to combine redundant nodes in the tree post traversal
-#require "profile"
+
+#require "profile.rb"
 require "benchmark"
 puts Benchmark.measure(){
 if addGaps
 	print("Adding gaps...\n");
-	#puts Benchmark.measure(){
-	seqTree.addGaps(numThreads);
+#	puts Benchmark.measure(){
+	#if GOOGLE_HASH
+	#	gapCountFG = [GoogleHashDenseRubyToInt.new,GoogleHashDenseRubyToInt.new,GoogleHashDenseRubyToInt.new]; #[k][seq], first three blank since there are no gaps till k=3 and 0 is not a thing but is an index (0,1,2)
+	#	if useBG
+	#		gapCountBG = [GoogleHashDenseRubyToInt.new,GoogleHashDenseRubyToInt.new,GoogleHashDenseRubyToInt.new]
+	#	end
+	#else
+	gapCountFG = [{}]; #[k][seq], first three blank since there are no gaps till k=3 and 0 is not a thing but is an index (0,1,2)
+	gapCountFG[1]=Hash[seqTree.getAllNMers(1,alphabet).map{|key,v| [key,v]}];
+	gapCountFG[2]=Hash[seqTree.getAllNMers(2,alphabet).map{|key,v| [key,v]}];
 	if useBG
-		bgTree.addGaps(numThreads);
+		gapCountBG = [{}]
+		gapCountBG[1]=Hash[bgTree.getAllNMers(1,alphabet).map{|key,v| [key,v]}];
+		gapCountBG[2]=Hash[bgTree.getAllNMers(2,alphabet).map{|key,v| [key,v]}];
 	end
-	#} #Benchmark
+	3.upto(maxTreeSize + superZ){|k|
+		if GOOGLE_HASH
+			gapCountFG[k] = GoogleHashDenseRubyToInt.new
+			if useBG
+				gapCountBG[k] = GoogleHashDenseRubyToInt.new;
+			end
+		else
+			gapCountFG[k] = {}
+			if useBG
+				gapCountBG[k] = {};
+			end
+		end
+		puts "k="+k.to_s()
+		#for each k-mer for which there could be gaps
+		oneLessGapMers=seqTree.getAllNMers(k,alphabet);
+		gapCountFG[k] = Hash[oneLessGapMers.map{|key,v| [key,v]}];
+		oneLessGapMers.map!{|key,v| key};
+		if useBG
+			bgMers=bgTree.getAllNMers(k,alphabet);
+			gapCountBG[k] = Hash[bgMers.map{|key,v| [key,v]}];
+			#0.upto(bgMers.length()-1){|i| 
+			#	gapCountBG[k][bgMers[i][0]] = bgMers[i][1];
+			#}
+		end
+		1.upto(k-2){|g|
+			#puts " g="+g.to_s()
+			#for each potential number of gaps
+			# I will add g gaps to every k-mer
+			sameNumGapMers = [];
+			0.upto(oneLessGapMers.length()-1){|m|
+				#puts "  m="+m.to_s()+" gkmer = "+oneLessGapMers[m]
+				#for each k-mer with g-1 gaps, add one more gap
+				1.upto(k-2){|p| 
+					#puts "   p="+p.to_s()
+					#for each position to which the gap could be added
+					if oneLessGapMers[m][p,1]=="A" #{
+						#Only add a gap if the position is an A because a gap (-) cannot be re-added and if I did it for ATGC, I would do it four times
+						#need: 
+						#1) expected counts for this gapped k-mer and expected counts when one base is removed from either side =>Z
+						#2) counts for the four Mers where position P={ATGC}, expected counts for these with a terminal base removed => superZ
+						curGappedKMer = oneLessGapMers[m].dup;
+						curGappedKMer[p,1]="-";
+						seqHits=0;
+						alphabet.each(){|b|
+						#	puts oneLessGapMers[m][0,p]+b+oneLessGapMers[m][p+1..-1]
+							seqHits+=gapCountFG[k][oneLessGapMers[m][0,p]+b+oneLessGapMers[m][p+1..-1]];
+						}
+						gapCountFG[k][curGappedKMer]=seqHits;
+						if useBG
+							seqHitsBG=0;
+							alphabet.each(){|b|
+								seqHitsBG+=gapCountBG[k][oneLessGapMers[m][0,p]+b+oneLessGapMers[m][p+1..-1]];
+							}
+							gapCountBG[k][curGappedKMer]=seqHitsBG;
+						end
+						sameNumGapMers.push(curGappedKMer);
+					end#}
+				}
+			}
+			oneLessGapMers=sameNumGapMers;
+		}
+#	} #Benchmark
+	}
 end
-#puts sprintf("seqTree.getThisMer(-A) = %i",seqTree.getThisMer("-A"))
-#puts sprintf("seqTree.getThisMer(--A) = %i",seqTree.getThisMer("--A"))
-#puts sprintf("seqTree.getThisMer(-A-) = %i",seqTree.getThisMer("-A-"))
-#puts sprintf("seqTree.getThisMer(A--) = %i",seqTree.getThisMer("A--"))
-#puts sprintf("seqTree.getThisMer(A-) = %i",seqTree.getThisMer("A-"))
-#puts sprintf("seqTree.getThisMer(AAA-A) = %i",seqTree.getThisMer("AAA-A"))
-#puts sprintf("seqTree.getThisMer(AA--A) = %i",seqTree.getThisMer("AA--A"))
-#puts sprintf("seqTree.getThisMer(AAAA) = %i",seqTree.getThisMer("AAAA"))
-#puts sprintf("seqTree.getThisMer(AAAAA) = %i",seqTree.getThisMer("AAAAA"))
-#puts seqTree.toString()
 print("Calculating statistics... \n");
 #puts Benchmark.measure(){
 allData = [];
 indexHash={};
 nextI=0;
 refNum=0;
-if addGaps
-	possibleLetters = alphabetGaps;
-else
-	possibleLetters = alphabet;
-end
 2.upto(maxTreeSize){|k|
-	curFGDist = seqTree.getAllNMers(k,possibleLetters);
+	if addGaps
+		curFGDist=gapCountFG[k].keys().sort();
+	else
+		curFGDist = seqTree.getAllNMers(k,alphabet);
+	end
 	kMersTotalFG = allKMerTotalsFG[k]; # the total numer of k-mers in FG
 	if useBG
-		curBGDist=bgTree.getAllNMers(k,possibleLetters);
+		if addGaps
+			curBGDist=gapCountBG[k].keys().sort();
+		else
+			curBGDist=bgTree.getAllNMers(k,alphabet);
+		end
 		kMersTotalBG = allKMerTotalsBG[k]; # the total number of k-mers in BG
 		raise("The number of query and background #{k}-mers are different: #{curFGDist.length()} #{curBGDist.length()}") if curFGDist.length()!=curBGDist.length();
 	end
 	#printf("k = %d\n",k);
 	0.upto(curFGDist.length-1){|i| # for each k-mer, i
-			seqNMer, seqHits = curFGDist[i];
-		if seqNMer[0,1]=="-" || seqNMer[-1,1]=="-"
-			next;
-		end
 		curKMerData=[];
 		curKMerData[I_K]=k;
+		if addGaps #has gaps
+			seqNMer=curFGDist[i]
+			seqHits = gapCountFG[k][seqNMer];
+		else
+			seqNMer, seqHits = curFGDist[i];
+		end
 		curKMerData[I_SEQ]=seqNMer;
 		curKMerData[I_RC]=revcomp(seqNMer)
 		curKMerData[I_NumFG]=seqHits;
@@ -206,8 +268,38 @@ end
 		s2=seqNMer[0,k-1]; #prefix (k-1)-mer sub-motif
 		subLenCorrFG1 = 1.0 * kMersTotalFG/allKMerTotalsFG[k-1]
 		subLenCorrFG2 = 1.0 * kMersTotalFG/allKMerTotalsFG[k-1]
-		e1=ntHash[n1]*seqTree.getThisMer(s1);#expected frequency of cur k-mer, given s1 frequency and n1
-		e2=ntHash[n2]*seqTree.getThisMer(s2);# expected frequency of cur k-mer, given s2 frequency and n2
+		if addGaps # has gaps
+			#print("s1: "+s1+"\n");
+			#print("s2: "+s2+"\n");
+			kS = k-1
+			while s1[0,1]=="-" #remove gaps
+				s1=s1[1..-1];
+				subLenCorrFG1 = subLenCorrFG1*allKMerTotalsFG[kS]/allKMerTotalsFG[kS-1]
+				kS=kS-1;
+			end
+			kS = k-1
+			while s2[-1,1]=="-" #remove gaps
+				s2=s2[0..-2];
+				subLenCorrFG2 = subLenCorrFG2*allKMerTotalsFG[kS]/allKMerTotalsFG[kS-1]
+				kS=kS-1;
+			end
+				#although using s1.length instead of k-1 for the /allKMerTotalsBG index might seem to make sense, we actually are pretending this has terminal gaps and so k-1 should be used here too
+			#puts("s1: "+s1+"\n");
+			begin
+			e1=ntHash[n1]*gapCountFG[s1.length()][s1];#expected frequency of cur k-mer, given s1 frequency and n1
+			#puts("s2: "+s2+"\n");
+			e2=ntHash[n2]*gapCountFG[s2.length][s2];# expected frequency of cur k-mer, given s2 frequency and n2
+			rescue Exception => e
+				puts s1
+				puts s2
+				puts gapCountFG[s1.length()][s1]
+				puts gapCountFG[s2.length()][s2]
+				raise e
+			end
+		else
+			e1=ntHash[n1]*seqTree.getThisMer(s1);#expected frequency of cur k-mer, given s1 frequency and n1
+			e2=ntHash[n2]*seqTree.getThisMer(s2);# expected frequency of cur k-mer, given s2 frequency and n2
+		end
 		eMax=[e1*subLenCorrFG1,e2*subLenCorrFG2].max(); # compare to max if enriched, as count
 		dMin=[e1*subLenCorrFG1,e2*subLenCorrFG2].min(); # compare to min if depleted, as count
 		if eMax==0 # (k-1)-mers do not occur
@@ -231,13 +323,6 @@ end
 		if expected!=0
 			justZScore=(0.0+seqHits-expected)/(Math.sqrt(expected));
 		end
-		if false && s1=~/^[A-]*$/ && s2=~/^[-A]*$/
-			puts sprintf("seqNMer = %s, s1 = %s, s2 = %s", seqNMer, s1, s2);
-			puts sprintf("seqTree.getThisMer(seqNMer) = %i; seqHits=%i",seqTree.getThisMer(seqNMer),seqHits);
-			puts sprintf("seqTree.getThisMer(s1) = %i, seqTree.getThisMer(s2) = %i", seqTree.getThisMer(s1), seqTree.getThisMer(s2));
-			puts sprintf("expected = %f, eMax = %f, dMin = %f", expected, eMax, dMin);
-			puts sprintf("");
-		end
 		curKMerData[I_SubZFG]=justZScore;
 		if useBG # calculate normalized z score {
 			subLenCorrBG1 = 1.0 ;
@@ -248,9 +333,17 @@ end
 			(k).downto(s2.length()+1){|kS|
 				subLenCorrBG2=subLenCorrBG2*allKMerTotalsBG[kS]/allKMerTotalsBG[kS-1];
 			}
-			bgNMer, bgHits = curBGDist[i];
-			e1b=ntHash[n1]*bgTree.getThisMer(s1);#expected freq of (k-1)-mer in BG, using sub-motif s1
-			e2b=ntHash[n2]*bgTree.getThisMer(s2);# same for s2
+			if addGaps #has gaps
+				bgNMer = curBGDist[i];
+				bgHits = gapCountBG[k][bgNMer];
+				#although using s1.length instead of k-1 for the /allKMerTotalsBG index might seem to make sense, we actually are pretending this has terminal gaps and so k-1 should be used here too
+				e1b=ntHash[n1]*gapCountBG[s1.length()][s1];#expected freq of (k-1)-mer in BG, using sub-motif s1
+				e2b=ntHash[n2]*gapCountBG[s2.length()][s2];# same for s2
+			else
+				bgNMer, bgHits = curBGDist[i];
+				e1b=ntHash[n1]*bgTree.getThisMer(s1);#expected freq of (k-1)-mer in BG, using sub-motif s1
+				e2b=ntHash[n2]*bgTree.getThisMer(s2);# same for s2
+			end
 			raise("bgNMer and seqNMer are not the same! "+bgNMer+" "+seqNMer+" i="+i.to_s()) if bgNMer!=seqNMer;
 			curKMerData[I_NumBG]=bgHits;
 			curKMerData[I_PctBG]=(100.0*bgHits)/allKMerTotalsBG[k];
@@ -289,7 +382,6 @@ end
 			end
 			if dMin==0 
 				if seqHits!=0
-					puts 
 					raise("Expected-depl is 0, but actual is not in FG: "+seqNMer);
 				end
 				# if there were no hits expected in the FG, the BG, or the BG had no hits this will be undef (/0 error)
@@ -321,13 +413,23 @@ end
 			if seqHits==0 # if no instances of this motif, there can be no super motifs
 				curKMerData[I_SuperZFG]=0.0;
 			else
-				alphabet.each{|b| 
-					curExp=(0.0+seqHits)*ntHash[b]; #calculate most enriched and most depleted (k+1)-mer Z score given k-mer
-					if curExp>0
-						supZmax=[supZmax, (0.0+seqTree.getThisMer(seqNMer+b)-curExp)/Math.sqrt(curExp),(0.0+seqTree.getThisMer(b+seqNMer)-curExp)/Math.sqrt(curExp)].max();
-						supZmin=[supZmin, (0.0+seqTree.getThisMer(seqNMer+b)-curExp)/Math.sqrt(curExp),(0.0+seqTree.getThisMer(b+seqNMer)-curExp)/Math.sqrt(curExp)].min();
-					end
-				}
+				if addGaps #has gaps
+					alphabet.each{|b| 
+						curExp=(0.0+seqHits)*ntHash[b]; #calculate most enriched and most depleted (k+1)-mer Z score given k-mer
+						if curExp>0
+							supZmax=[supZmax, (0.0+gapCountFG[k+1][seqNMer+b]-curExp)/Math.sqrt(curExp),(0.0+gapCountFG[k+1][b+seqNMer]-curExp)/Math.sqrt(curExp)].max();
+							supZmin=[supZmin, (0.0+gapCountFG[k+1][seqNMer+b]-curExp)/Math.sqrt(curExp),(0.0+gapCountFG[k+1][b+seqNMer]-curExp)/Math.sqrt(curExp)].min();
+						end
+					}
+				else
+					alphabet.each{|b| 
+						curExp=(0.0+seqHits)*ntHash[b]; #calculate most enriched and most depleted (k+1)-mer Z score given k-mer
+						if curExp>0
+							supZmax=[supZmax, (0.0+seqTree.getThisMer(seqNMer+b)-curExp)/Math.sqrt(curExp),(0.0+seqTree.getThisMer(b+seqNMer)-curExp)/Math.sqrt(curExp)].max();
+							supZmin=[supZmin, (0.0+seqTree.getThisMer(seqNMer+b)-curExp)/Math.sqrt(curExp),(0.0+seqTree.getThisMer(b+seqNMer)-curExp)/Math.sqrt(curExp)].min();
+						end
+					}
+				end
 				if justZScore>0 # if k-mer is enriched
 					curKMerData[I_SuperZFG]=(supZmax); #use enrichment
 				elsif justZScore<0 # if k-mer depleted
@@ -343,13 +445,23 @@ end
 				else #}{
 					supZmax=0.0;
 					supZmin=0.0;
-					alphabet.each{|b| #calc BG super Z
-						curExp=(0.0+bgHits)*ntHashBG[b];
-						if curExp>0
-							supZmax=[supZmax, (0.0+bgTree.getThisMer(seqNMer+b)-curExp)/Math.sqrt(curExp),(0.0+bgTree.getThisMer(b+seqNMer)-curExp)/Math.sqrt(curExp)].max();
-							supZmin=[supZmin, (0.0+bgTree.getThisMer(seqNMer+b)-curExp)/Math.sqrt(curExp),(0.0+bgTree.getThisMer(b+seqNMer)-curExp)/Math.sqrt(curExp)].min();
-						end
-					}
+					if addGaps #has gaps
+						alphabet.each{|b| #calc BG super Z
+							curExp=(0.0+bgHits)*ntHashBG[b];
+							if curExp>0
+								supZmax=[supZmax, (0.0+gapCountBG[k+1][seqNMer+b]-curExp)/Math.sqrt(curExp),(0.0+gapCountBG[k+1][b+seqNMer]-curExp)/Math.sqrt(curExp)].max();
+								supZmin=[supZmin, (0.0+gapCountBG[k+1][seqNMer+b]-curExp)/Math.sqrt(curExp),(0.0+gapCountBG[k+1][b+seqNMer]-curExp)/Math.sqrt(curExp)].min();
+							end
+						}
+					else
+						alphabet.each{|b| #calc BG super Z
+							curExp=(0.0+bgHits)*ntHashBG[b];
+							if curExp>0
+								supZmax=[supZmax, (0.0+bgTree.getThisMer(seqNMer+b)-curExp)/Math.sqrt(curExp),(0.0+bgTree.getThisMer(b+seqNMer)-curExp)/Math.sqrt(curExp)].max();
+								supZmin=[supZmin, (0.0+bgTree.getThisMer(seqNMer+b)-curExp)/Math.sqrt(curExp),(0.0+bgTree.getThisMer(b+seqNMer)-curExp)/Math.sqrt(curExp)].min();
+							end
+						}
+					end
 					if justZScore>0 # k-mer in FG is enriched
 						curKMerData[I_SuperZBG] = (supZmax);
 					elsif justZScore<0 #depleted
@@ -380,17 +492,31 @@ end
 							end
 							denom=1.0 if denom==0;
 							#((Oq-Eq)*cq-(Obg-Ebg)*cbg)/sqrt(min(Eq,Ebg))
-							#begin
-							supZmax=[supZmax, ((0.0+seqTree.getThisMer(seqNMer+b)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(seqNMer+b)-curExpBG)*scaleBG)/denom,((0.0+seqTree.getThisMer(b+seqNMer)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(b+seqNMer)-curExpBG)*scaleBG)/denom].max();
-							supZmin=[supZmin, ((0.0+seqTree.getThisMer(seqNMer+b)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(seqNMer+b)-curExpBG)*scaleBG)/denom,((0.0+seqTree.getThisMer(b+seqNMer)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(b+seqNMer)-curExpBG)*scaleBG)/denom].min();
+#							begin
+							if addGaps #has gaps
+								supZmax=[supZmax, ((0.0+gapCountFG[k+1][seqNMer+b]-curExpSeq)*scaleFG-(0.0+gapCountBG[k+1][seqNMer+b]-curExpBG)*scaleBG)/denom,((0.0+gapCountFG[k+1][b+seqNMer]-curExpSeq)*scaleFG-(0.0+gapCountBG[k+1][b+seqNMer]-curExpBG)*scaleBG)/denom].max();
+								supZmin=[supZmin, ((0.0+gapCountFG[k+1][seqNMer+b]-curExpSeq)*scaleFG-(0.0+gapCountBG[k+1][seqNMer+b]-curExpBG)*scaleBG)/denom,((0.0+gapCountFG[k+1][b+seqNMer]-curExpSeq)*scaleFG-(0.0+gapCountBG[k+1][b+seqNMer]-curExpBG)*scaleBG)/denom].min();
+							else
+								supZmax=[supZmax, ((0.0+seqTree.getThisMer(seqNMer+b)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(seqNMer+b)-curExpBG)*scaleBG)/denom,((0.0+seqTree.getThisMer(b+seqNMer)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(b+seqNMer)-curExpBG)*scaleBG)/denom].max();
+								supZmin=[supZmin, ((0.0+seqTree.getThisMer(seqNMer+b)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(seqNMer+b)-curExpBG)*scaleBG)/denom,((0.0+seqTree.getThisMer(b+seqNMer)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(b+seqNMer)-curExpBG)*scaleBG)/denom].min();
+							end
 #							rescue Exception => e
 #								puts denom
 #								puts scaleFG
 #								puts scaleBG
+#								puts gapCountFG[k+1][seqNMer+b]
+#								puts gapCountFG[k+1][b+seqNMer]
+#								puts gapCountBG[k+1][seqNMer+b]
+#								puts gapCountBG[k+1][b+seqNMer]
 #								puts scaleFG;
 #								puts curExpBG;
-#								puts ((0.0+seqTree.getThisMer(seqNMer+b)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(seqNMer+b)-curExpBG)*scaleBG)/denom;
-#								puts ((0.0+seqTree.getThisMer(b+seqNMer)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(b+seqNMer)-curExpBG)*scaleBG)/denom;
+#								if addGaps
+#									puts ((0.0+gapCountFG[k+1][seqNMer+b]-curExpSeq)*scaleFG-(0.0+gapCountBG[k+1][seqNMer+b]-curExpBG)*scaleBG)/denom
+#									puts ((0.0+gapCountFG[k+1][b+seqNMer]-curExpSeq)*scaleFG-(0.0+gapCountBG[k+1][b+seqNMer]-curExpBG)*scaleBG)/denom
+#								else
+#									puts ((0.0+seqTree.getThisMer(seqNMer+b)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(seqNMer+b)-curExpBG)*scaleBG)/denom;
+#									puts ((0.0+seqTree.getThisMer(b+seqNMer)-curExpSeq)*scaleFG-(0.0+bgTree.getThisMer(b+seqNMer)-curExpBG)*scaleBG)/denom;
+#								end
 #								puts e
 #								exit()
 #							end
