@@ -141,8 +141,8 @@ allKMerTotalsBG=[] if useBG;
 #TODO: instead of revcomping and traversing the sequnces twice, it would be marginally more efficient to combine redundant nodes in the tree post traversal
 
 #require "profile.rb"
-require "benchmark"
-puts Benchmark.measure(){
+#require "benchmark"
+#puts Benchmark.measure(){
 if addGaps
 	print("Adding gaps...\n");
 #	puts Benchmark.measure(){
@@ -537,7 +537,7 @@ refNum=0;
 	}
 	curFGDist=nil;#garbage
 }
-} #Benchmark
+#} #Benchmark
 print("Sorting results...\n");
 if superZ==1 # sort using superZ and BG
 	#print("Sorting results by superZ...\n");
