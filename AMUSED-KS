@@ -1,165 +1,213 @@
 #!/usr/bin/ruby
 require "MATHS.rb"
-require "DNATOOLBOX.rb"
+require "NMERTREE.rb"
 require "UTILS.rb";
 require "SWITCHES.rb"
 NUMARGV=4;
 if ARGV.length()<NUMARGV  || ARGV[0]=~/^--?[h?]/
-	print("Usage: kMerScanKS -q <inFPQuery>  -o <outFP> [-r <randomizeNMer>] [-s <maxTreeSize>]\n");
+	print("Usage: AMUSED-KS -q <inFPQuery>  -o <outFP> [-b <backgroundSeqs>] [-s <maxTreeSize>] [-m <smoothBy>] [-t <numThreads] [-p] [-1p]\n");
 	print("  -q <inFPQuery> = query sequences\n");
+	print("  -b <inFPBG> = compare seqs to these background seqs\n");
 	print("  -o <outFP> = output file\n");
-	#print("ONLY 1 IMP  -r <randomizeNMer> = compare to background (binomial) created by permuting input in <randomizeNMer> chunks [default=1], ignored if -b used\n");
 	print("  -s <maxTreeSize> = max n-mer to consider [default=6]\n");
-	print("  -m <smoothBy> = smooth data over how many bases [default=5]\n");
+	print("  -m <smoothBy> = smooth data over how many bases to generate expected distribution for one-sample KS test (when no background set is included) [default=5]\n");
+	print("  -t <numThreads> = number of CPU threads to use [default=1]\n");
+	print("  -p = calculate K-S p values\n");
+	print("  -1p = sequences not in fasta format: each line is a full sequence\n");
 	exit;
 end
 
 #maxTreeSize=5;
-switches = parseSwitches(ARGV,{"s"=>1,'o'=>1,'q'=>1,'m'=>1});
-switches=getDefaults(switches,{"s"=>6,"m"=>5});
+switches = parseSwitches(ARGV,{"s"=>1,'o'=>1,'q'=>1,'m'=>1,'1p'=>0,'t'=>1,'b'=>1,'p'=>0,'1p'=>0});
+switches=getDefaults(switches,{"s"=>6,"m"=>5,'t'=>1});
 maxTreeSize=switches['s'].to_f();
 smoothBy=switches["m"].to_i();
+numThreads=switches["t"].to_i();
+numThreads = [numThreads,1].max();
 seqInFP = switches['q'];
+useBG = !switches['b'].nil?;
+isFasta = switches['1p'].nil?;
+calcPValues = !switches['p'].nil?;
+if useBG
+	bgInFP = switches['b'];
+end
 outFP = switches['o'];
 #randomizeNMer = switches['r'].to_i();
 
 alphabet = ["A","T","G","C"];
+print("Inputing All Data...\n")
 
-
-def enumerateKMers(alphabet,k)
-	return [""] if k==0;
-	allKMers=[]
-	kMers = enumerateKMers(alphabet,(k-1));
-	kMers.each(){|mer|
-		alphabet.each(){|b|
-			allKMers.push(mer+b);
-		}
-	}
-	return allKMers;
-end
-
-def enumerateAllKMers(alphabet,k)
-	allKMers=[];
-	1.upto(k){|i|
-		allKMers+=enumerateKMers(alphabet,i);
-	}
-	return allKMers;
-end
-
-
-#p(enumerateAllKMers(alphabet, maxTreeSize));
-
-seqHashes=nil;
 theLen=nil;
 seqTotLen=0;
 seqCount = 0;
-File.foreach(seqInFP){|line|
-	if line==""||line==nil|| line[0,1]==">"
+fgSR =SeqReader.new(open(seqInFP,"r"),isFasta);
+curSeq = fgSR.next();
+raise("First sequence in fg is nil!") if curSeq.nil?
+theLen=curSeq.length();
+fgKDist = KMerDist.new(alphabet,theLen,maxTreeSize)
+fgKDist.traverse(curSeq);
+t1 = Thread.new{
+	while curSeq = fgSR.next()
+		raise(sprintf("Not all sequences in FG are the same length as FG at seq #%i!",seqCount+1)) if curSeq.length()!=theLen;
+		fgKDist.traverse(curSeq);
+		seqCount+=1;
+	end
+}
+if numThreads==1
+	t1.join()
+end
+
+if useBG
+	print("Inputing BG...\n")
+	bgCount=0
+	bgKDist = KMerDist.new(alphabet,theLen,maxTreeSize)
+	bgSR =SeqReader.new(open(bgInFP,"r"),isFasta);
+	while curSeq = bgSR.next()
+		raise(sprintf("Not all sequences in BG are the same length as FG at seq #%i!",bgCount+1)) if curSeq.length()!=theLen;
+		bgKDist.traverse(curSeq);
+		bgCount+=1;
+	end
+	t1.join() # need this to complete before making expectation
+else # make bg from smoothed fg
+	t1.join() # need this to complete before making expectation
+	print("Making BG...\n")
+	baseFreqs = Hash.new();
+	alphabet.each(){|b| # copy fg dist, and normalize to fractions at each position
+		baseFreqs[b] = fgKDist[b].map(){|e| e.to_f()/seqCount}; #scale to frequency
+	}
+	#smooth bgMatrix
+	if smoothBy>1
+		alphabet.each(){|b|
+			baseFreqs[b] = smooth(baseFreqs[b], smoothBy);
+		}
+	end
+end
+
+I_K = 0; I_SEQ = 1; I_RC = 2; I_NumFG=3; I_D=4; I_Kstat=5;  I_MaxDiffPos=6;
+header=[];
+header.push("k","kMer", "kMerRC", "NumFG","KS-D","KS-K","MaxDiffPos"); #general headers
+allData = [];
+numEntries=7;
+if useBG
+	I_NumBG = numEntries;
+	numEntries+=1;
+	header.push("NumBG");
+end
+if calcPValues
+	I_P = numEntries;
+	numEntries+=1;
+	header.push("KS-P");
+end
+print("Calculating statistics...\n")
+fgKDist.keys.each{|k|
+	curData = [0.0]*numEntries;
+	curData[I_K] = k.length(); curData[I_SEQ] = k; curData[I_RC] = revcomp(k);
+	cdfFG =[0.0]*theLen;
+	cdfFG[0]+=fgKDist[k][1].to_f();
+	1.upto(theLen-1){|i|
+		cdfFG[i]+=cdfFG[i-1]+fgKDist[k][i];
+	}
+	countFG=cdfFG[theLen-1];
+	curData[I_NumFG]=countFG;
+	if countFG==0 # no observences - no statistics
+		allData.push(curData);
 		next;
 	end
-	curSeq  = line.chomp();
-	if seqHashes.nil?
-		theLen=curSeq.length();
-		seqHashes=Hash.new();
-		enumerateAllKMers(alphabet, maxTreeSize).each{|mer| seqHashes[mer]=[0]*theLen};
-	end
-	raise('Not all sequences are the same length!') if curSeq.length()!=theLen;
-
-	1.upto(maxTreeSize){|i|
-		0.upto(theLen-1){|j|
-			seqHashes[curSeq[j,i]][j]+=1;
+	cdfFG.map!(){|e|  e/countFG; }; # to frequencies
+	cdfBG =[0.0]*theLen;
+	if useBG
+		cdfBG[0]+=bgKDist[k][1].to_f();
+		1.upto(theLen-1){|i|
+			cdfBG[i]+=cdfBG[i-1]+bgKDist[k][i];
 		}
-	}
-	seqCount+=1;
-}
-print("Input All Data, All Hashes Built.  Buiding weight matrix and expectation\n");
-
-bgMatrix = Hash.new();
-alphabet.each(){|b|
-	bgMatrix[b]=seqHashes[b].dup();
-	bgMatrix[b].map!(){|e| e.to_f()/seqCount};
-	bgMatrix[b]+=[bgMatrix[b][bgMatrix.length()-1]]*(maxTreeSize-1);
-}
-
-#smooth bgMatrix
-if smoothBy>1
-	alphabet.each(){|b|
-		bgMatrix[b] = smooth(bgMatrix[b], smoothBy);
-	}
-	#renormalize;
-	totals=[0.0]*(theLen+maxTreeSize-1);
-	alphabet.each(){|b|
-		if totals.length()!=bgMatrix[b].length()
-			raise("Error! #{totals.length()}!=#{bgMatrix[b].length()}");
+		countBG=cdfBG[theLen-1];
+		curData[I_NumBG]=countBG;
+		if countBG==0 # no observences - no statistics
+			allData.push(curData);
+			next;
 		end
-		0.upto(bgMatrix[b].length()-1){|i|
-			totals[i]+=bgMatrix[b][i];
+		cdfBG.map!(){|e|  e/countBG; }; # to frequencies
+	else
+	
+		curF=[1.0]*theLen; #calculate frequencies expected by BG
+		0.upto(theLen-k.length()){|i|
+			0.upto(k.length()-1){|j|
+				curF[i]=curF[i]*baseFreqs[k[j,1]][i+j];
+			}
 		}
-	}
-	alphabet.each(){|b|
-		0.upto(bgMatrix[b].length()-1){|i|
-			bgMatrix[b][i]=bgMatrix[b][i]/totals[i];
+		(theLen-k.length()+1).upto(theLen-1){|i| #add 0s to the end since k=8-mers cannot be observed at end-7 or later
+			curF[i]=0.0
 		}
-	}
-end
-#
-#
-
-expectation = Hash.new();
-cdf = Hash.new();
-counts = Hash.new();
-seqHashes.keys.each{|k|
-	cdf[k]=[0.0]*theLen;
-	cdf[k][0]+=seqHashes[k][1].to_f();
-	1.upto(theLen-1){|i|
-		cdf[k][i]+=cdf[k][i-1]+seqHashes[k][i];
-	}
-	counts[k]=cdf[k][theLen-1];
-	if cdf[k][theLen-1]==0
-		0.upto(theLen-1){|i|
-			cdf[k][i]=i;
+		#turn into CDF
+		cdfBG=[0.0]*theLen;
+		cdfBG[0]=curF[0];
+		1.upto(theLen-1){|i|
+			cdfBG[i]+=cdfBG[i-1]+curF[i];
 		}
+		cdfBG.map!(){|e| e/cdfBG[theLen-1]}; #renormalize
 	end
-	cdf[k].map!(){|e|  e/cdf[k][theLen-1]; };
-
-	curF=[1.0]*theLen; #calculate frequencies expected by BG
-	0.upto(theLen-1){|i|
-		0.upto(k.length()-1){|j|
-			curF[i]=curF[i]*bgMatrix[k[j,1]][i+j];
-		}
-	}
-	#turn into CDF
-	expectation[k]=[0.0]*theLen;
-	1.upto(theLen-1){|i|
-		expectation[k][i]+=expectation[k][i-1]+curF[i];
-	}
-	expectation[k].map!(){|e| e/expectation[k][theLen-1]};
-}
-
-
-
-print("Performing K-S tests:\n");
-allData = [];
-seqHashes.keys.each{|k|
+	print(sprintf("k="%s"\n",k));
+	print(sprintf("nFG=%i\n",countFG));
+	if useBG
+		print(sprintf("nBG=%i\n",countBG));
+	end
+	print(sprintf("cdfFG=c(%s);\n",cdfFG.join(", ")));
+	print(sprintf("cdfBG=c(%s);\n",cdfBG.join(", ")));
+	exit
 	totDiff=0.0;
 	maxDiff=0.0;
-	1.upto(theLen-1){|i|
-		curDiff =(cdf[k][i]-expectation[k][i]).abs();
+	maxDiffI = 0;
+	0.upto(theLen-1){|i|
+		curDiff =(cdfFG[i]-cdfBG[i]).abs();
 		totDiff+=curDiff;
-		maxDiff=[maxDiff,curDiff].max();
+		if curDiff>maxDiff
+			maxDiff = curDiff;
+			maxDiffI=i;
+		end
 	}
-	count=counts[k];
-	allData.push([k,totDiff,maxDiff,count,Math.sqrt(count)*maxDiff]);
+	curData[I_D] = maxDiff; curData[I_MaxDiffPos]=maxDiffI; 
+	if !useBG
+		#print("one eCDF\n")
+		curData[I_Kstat]=Math.sqrt(countFG)*maxDiff;
+	else
+		#print("two eCDF\n")
+		curData[I_Kstat]=Math.sqrt((countFG*countBG)/(countBG+countFG))*maxDiff;
+	end
+	allData.push(curData);
 }
 
 print("Sorting results...\n");
 allData.sort!(){|a,b|
-	b[4]<=>a[4];
+	b[I_Kstat]<=>a[I_Kstat];
 }
+
+def calcKSP(x)
+	p=1;
+	k=1;
+	c1=math.sqrt(pi*2)/x;
+	while k<100
+		p-=c1*exp(-(2*k-1)^2*pi^2/(8*x^2))
+		k+=1;
+	end
+end
+
+print("Calculating P-values...\n");
+if calcPValues
+	lastP=0;
+	0.upto(allData.length()){|i|
+		if lastP<0.01
+			#calcP 
+			lastP = 0.01
+			allData[i][I_P]=0.01;
+		else
+			allData[i][I_P]=1;
+		end
+	}
+end
 
 print("Printing results...\n");
 outFile=File.open(outFP,"w");
-outFile.print("totDiff\tD\tcount\tK\n");
+outFile.print(header.join("\t")+"\n");
 0.upto(allData.length()-1){|i|
 	outFile.print(allData[i].map(){|e| e.to_s()}.join("\t")+"\n");
 	#outFile.print("#{k}\t#{totDiff}\t#{maxDiff}\t#{count}\t#{Math.sqrt(count)*maxDiff}\n");

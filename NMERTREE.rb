@@ -1,3 +1,128 @@
+class NMerTreeHash
+	def initialize(s,a)
+		@maxTreeSize=s;
+		@alphabet=a
+		@seqHashes=Hash.new();
+		1.upto(s){|i|
+			enumerateKMers(@alphabet, i).each{|mer| @seqHashes[mer]=0};
+		}
+	end
+	def traverse(seq)
+		1.upto(@maxTreeSize){|i| # for each k mer
+			0.upto(seq.length()-i){|j| # for each starting position
+				@seqHashes[seq[j,i]]+=1;
+			}
+		}
+	end
+	def getAllNMers(l,alphabet)
+		#return Hash[enumerateAllKMers(alphabet,l).map{|key| [key,@seqHashes[key]]}];
+		return enumerateAllKMers(alphabet,l).map{|key| [key,@seqHashes[key]]};
+	end
+	def keys(i)
+		retMe = [];
+		@seqHashes.keys.each{|k| 
+			if k.length==i
+				retMe.push(k);
+			end
+			}
+			return retMe
+	end
+	def [](k)
+		return @seqHashes[k];
+	end
+	def []=(k,v)
+		return @seqHashes[k]=v;
+	end
+end
+
+class KMerDist
+	def initialize(alphabet,theLen,maxTreeSize)
+		@alphabet = alphabet;
+		@theLen=theLen;
+		@maxTreeSize=maxTreeSize;
+		@seqHashes=Hash.new();
+		enumerateAllKMers(@alphabet, @maxTreeSize).each{|mer| @seqHashes[mer]=[0]*@theLen};
+	end
+	def keys()
+		return @seqHashes.keys();
+	end
+	def [](key)
+		return @seqHashes[key];
+	end
+	def traverse(seq)
+		1.upto(@maxTreeSize){|i| # for each k mer
+			0.upto(@theLen-i){|j| # for each starting position
+				@seqHashes[seq[j,i]][j]+=1;
+			}
+		}
+	end
+end
+def enumerateKMers(alphabet,k)
+	return [""] if k==0;
+	allKMers=[]
+	kMers = enumerateKMers(alphabet,(k-1));
+	kMers.each(){|mer|
+		alphabet.each(){|b|
+			allKMers.push(mer+b);
+		}
+	}
+	return allKMers;
+end
+
+def enumerateAllKMers(alphabet,k)
+	allKMers=[];
+	1.upto(k){|i|
+		allKMers+=enumerateKMers(alphabet,i);
+	}
+	return allKMers;
+end
+def revcomp(sequence)
+	return sequence.reverse.tr("ATGCMRWSYKVHDB", "TACGKYSWRMBDHV"); #added for bad genomes 20110128
+end
+
+class SeqReader
+	def initialize(file, isFasta)
+		@file=file;
+		@isFasta = isFasta;
+		if @isFasta
+			line = @file.gets();
+			if line[0,1]==">"
+				@hasNext = true;
+			else
+				raise("File not in FASTA format!");
+			end
+		end
+	end
+	def nextFA()
+		curSeq = ""
+		while line = @file.gets()
+			if line[0,1]==">"
+				return curSeq;
+			else
+				curSeq+=line.chomp();
+			end
+		end
+		@hasNext=false;
+		return curSeq;
+	end
+	def next()
+		if @isFasta
+			if @hasNext
+				return self.nextFA();
+			else
+				return nil;
+			end
+		else
+			line = @file.gets();
+			return line if line.nil?;
+			return line.chomp();
+		end
+	end
+end
+
+
+# the following are vestigial.  Using a hash turned out to beslightly more efficient.
+
 class NMerTree
 	def initialize(maxLen)
 		@maxDepth=maxLen;
