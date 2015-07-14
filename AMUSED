@@ -2,6 +2,7 @@
 require "NMERTREE.rb"
 require "UTILS.rb";
 require "SWITCHES.rb"
+require "GZ.rb"
 
 NUMARGV=4;
 if ARGV.length()<NUMARGV  || ARGV[0]=~/^--?[h?]/ #TODO: clean
@@ -15,12 +16,14 @@ if ARGV.length()<NUMARGV  || ARGV[0]=~/^--?[h?]/ #TODO: clean
 	print("  -t <numThreads> = number of CPU threads to use [default=1]\n");
 	print("  -1p = sequences not in fasta format: each line is a full sequence\n");
 	print("  -ng = no inserting gaps\n");
+	print("  -nu = no changing to upper case before scan (non ATGC bases are discarded)\n");
 	print("  -ds = double stranded (reverse complement sequences too)\n");
+	print("  -ns = don't sort\n");
 	print("  -nsz = don't calculate super Zs\n");
 	exit;
 end
 
-switches = parseSwitches(ARGV,{"s"=>1,'z'=>1,'o'=>1,'q'=>1,'b'=>1,'ds'=>1,'bp'=>1,'nsz'=>0,'ng'=>0,'t'=>1, '1p'=>0});
+switches = parseSwitches(ARGV,{"s"=>1,'z'=>1,'o'=>1,'q'=>1,'b'=>1,'ds'=>1,'bp'=>1,'nsz'=>0,'ng'=>0,'t'=>1, '1p'=>0,'ns'=>0, 'nu'=>0});
 switches=getDefaults(switches,{"s"=>8,'z'=>0,'bp'=>'0.5','t'=>"1"});
 numThreads = switches['t'].to_i();
 numThreads = [numThreads,1].max();
@@ -33,6 +36,8 @@ addGaps = switches['ng'].nil?;
 outFP = switches['o'];
 doubleStranded=!switches['ds'].nil?
 isFasta=switches['1p'].nil?
+noSort = !switches['ns'].nil?
+toUpper = switches['nu'].nil?
 superZ=switches['nsz'].nil?();
 minSubZ = switches['z'].to_i();
 if superZ
@@ -46,16 +51,21 @@ alphabet = ["A","T","G","C"];
 #initialize background
 if useBG
 	print("Scanning background sequences\n");
-	gapCountBG =NMerTreeHash.new(maxTreeSize+superZ,alphabet);
+	gapCountBG = NMerTreeHash.new(maxTreeSize+superZ,alphabet);
 	bgTotLen=0;
 	bgCount  =0;
 	t1 = Thread.new{
-		bgSR =SeqReader.new(open(bgInFP,"r"),isFasta);
+		bgSR =SeqReader.new(smartGZIn(bgInFP,"r"),isFasta);
 		while curSeq = bgSR.next()
-			gapCountBG.traverse(curSeq); # traverse the current sequence
-			gapCountBG.traverse(revcomp(curSeq)) if doubleStranded;
-			bgTotLen+=curSeq.length
-			bgCount+=1;
+			curSeq.upcase!() if toUpper;
+			curSeqs = curSeq.split(/[^ATGC]+/); #fragment the sequence into different seqs separated by non-ATGC characters
+			curSeqs.each(){|curSeq|
+				next if curSeq=="";
+				gapCountBG.traverse(curSeq); # traverse the current sequence
+				gapCountBG.traverse(revcomp(curSeq)) if doubleStranded;
+				bgTotLen+=curSeq.length
+				bgCount+=1;
+			}
 		end
 	}
 	if (numThreads==1)
@@ -66,14 +76,19 @@ end
 #initialize foreground
 print("Scanning foreground sequences\n");
 gapCountFG =NMerTreeHash.new(maxTreeSize+superZ,alphabet);
-fgSR =SeqReader.new(open(fgInFP,"r"),isFasta);
+fgSR =SeqReader.new(smartGZIn(fgInFP,"r"),isFasta);
 seqTotLen=0;
 seqCount = 0;
 while curSeq= fgSR.next()
-	gapCountFG.traverse(curSeq); #scan the current sequence
-	gapCountFG.traverse(revcomp(curSeq)) if doubleStranded;
-	seqTotLen+=curSeq.length
-	seqCount+=1;
+	curSeq.upcase!() if toUpper;
+	curSeqs = curSeq.split(/[^ATGC]/); #fragment the sequence into different seqs separated by non-ATGC characters
+	curSeqs.each(){|curSeq|
+		next if curSeq=="";
+		gapCountFG.traverse(curSeq); #scan the current sequence
+		gapCountFG.traverse(revcomp(curSeq)) if doubleStranded;
+		seqTotLen+=curSeq.length
+		seqCount+=1;
+	}
 end
 if useBG
 	t1.join()
@@ -196,6 +211,9 @@ print("Calculating statistics... \n");
 #puts Benchmark.measure(){
 allData = [];
 indexHash={};
+if doubleStranded
+	didThese ={};
+end
 nextI=0;
 refNum=0;
 2.upto(maxTreeSize){|k|
@@ -211,6 +229,10 @@ refNum=0;
 		curKMerData=[];
 		curKMerData[I_K]=k;
 		seqNMer=curFGDist[i]
+		if (doubleStranded)
+			next if (!didThese[seqNMer].nil?);
+			didThese[revcomp(seqNMer)]=1;
+		end
 		seqHits = gapCountFG[seqNMer];
 		curKMerData[I_SEQ]=seqNMer;
 		curKMerData[I_RC]=revcomp(seqNMer)
@@ -438,38 +460,43 @@ refNum=0;
 	curFGDist=nil;#garbage
 }
 #} #Benchmark
-print("Sorting results...\n");
-if superZ==1 # sort using superZ and BG
-	#print("Sorting results by superZ...\n");
-	kPos = dataPositions["k"];#no BG
-	sortBy = I_SubZFG;#no BG
-	filterBy = I_ZDiffFG;
-	if useBG #
-		#print("Sorting results by superZ and BG...\n");
-		sortBy = I_SubZNorm;
-		filterBy = I_ZNormDiff;
-	end
-	allData.sort!(){|a,b|
-		case 
-		when a[filterBy]>0 && b[filterBy]<=0 && b[I_K]<maxTreeSize 
-			-1
-		when a[filterBy]<=0 && a[I_K]<maxTreeSize && b[filterBy]>0 
-			1
-		else
-			b[sortBy].abs() <=> a[sortBy].abs();
+if (noSort) # sort by sequence
+		allData.sort!(){|a,b|
+			b[I_SEQ]<=>a[I_SEQ]
+		};
+else
+	print("Sorting results...\n");
+	if superZ==1 # sort using superZ and BG
+		#print("Sorting results by superZ...\n");
+		kPos = dataPositions["k"];#no BG
+		sortBy = I_SubZFG;#no BG
+		filterBy = I_ZDiffFG;
+		if useBG #
+			#print("Sorting results by superZ and BG...\n");
+			sortBy = I_SubZNorm;
+			filterBy = I_ZNormDiff;
 		end
-	};
-else #no superZ
-	#sort by SubZ 
-	sortBy = I_SubZFG;#no BG
-	if useBG #BG
-		sortBy = I_SubZNorm;#no BG
+		allData.sort!(){|a,b|
+			case 
+			when a[filterBy]>0 && b[filterBy]<=0 && b[I_K]<maxTreeSize 
+				-1
+			when a[filterBy]<=0 && a[I_K]<maxTreeSize && b[filterBy]>0 
+				1
+			else
+				b[sortBy].abs() <=> a[sortBy].abs();
+			end
+		};
+	else #no superZ
+		#sort by SubZ 
+		sortBy = I_SubZFG;#no BG
+		if useBG #BG
+			sortBy = I_SubZNorm;#no BG
+		end
+		allData.sort!(){|a,b|
+			b[sortBy].abs()<=>a[sortBy].abs()
+		};
 	end
-	allData.sort!(){|a,b|
-		b[sortBy].abs()<=>a[sortBy].abs()
-	};
 end
-
 print("Printing results...\n");
 outFile = File.open(outFP, "w");
 outFile.print(header.join("\t")+"\n");
