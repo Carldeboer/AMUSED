@@ -12,7 +12,7 @@ if ARGV.length()<NUMARGV  || ARGV[0]=~/^--?[h?]/
 	print("  -s <maxTreeSize> = max n-mer to consider [default=6]\n");
 	print("  -m <smoothBy> = smooth data over how many bases to generate expected distribution for one-sample KS test (when no background set is included) [default=5]\n");
 	print("  -t <numThreads> = number of CPU threads to use [default=1]\n");
-	print("  -p = calculate K-S p values\n");
+#	print("  -p = calculate K-S p values\n");
 	print("  -1p = sequences not in fasta format: each line is a full sequence\n");
 	exit;
 end
@@ -146,14 +146,14 @@ fgKDist.keys.each{|k|
 		}
 		cdfBG.map!(){|e| e/cdfBG[theLen-1]}; #renormalize
 	end
-	print(sprintf("k="%s"\n",k));
-	print(sprintf("nFG=%i\n",countFG));
-	if useBG
-		print(sprintf("nBG=%i\n",countBG));
-	end
-	print(sprintf("cdfFG=c(%s);\n",cdfFG.join(", ")));
-	print(sprintf("cdfBG=c(%s);\n",cdfBG.join(", ")));
-	exit
+	#print(sprintf("k=\"%s\"\n",k));
+	#print(sprintf("nFG=%i\n",countFG));
+	#if useBG
+	#	print(sprintf("nBG=%i\n",countBG));
+	#end
+	#print(sprintf("cdfFG=c(%s);\n",cdfFG.join(", ")));
+	#print(sprintf("cdfBG=c(%s);\n",cdfBG.join(", ")));
+	#exit
 	totDiff=0.0;
 	maxDiff=0.0;
 	maxDiffI = 0;
