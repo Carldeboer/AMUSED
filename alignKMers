@@ -1,0 +1,269 @@
+#!/usr/bin/ruby
+require "DNATOOLBOX.rb"
+NUMARGV=2;
+if ARGV.length()<NUMARGV  || ARGV[0]=~/^--?[h?]/
+	print("Usage: alignKMers -i <inFile> -o <outFile> -l <logFile> -v <minOverlap> -m <mismatchPenalty>\n");
+	print(" -i <inFile> = unaligned k-mers\n");
+	print(" -v <minOverlap> = minimum overlap to align [default=3]\n");
+	print(" -r = also reverse complement\n");
+	print(" -m <mismatchPenalty> = penalty for mismatches [default=1]\n");
+	print(" -i <inFile> = \n");
+	print(" -o <outFile> = where to output results [default=stdout]\n");
+	print(" -l <logFile> = where to output results [default=stderr]\n");
+	exit;
+end
+require "SWITCHES.rb";
+switches = parseSwitches(ARGV[0,ARGV.length()-0], {"verb"=>0,'i'=>1,'m'=>1,'v'=>1,'l'=>1,'o'=>1,'r'=>0});
+switches = getDefaults(switches,{'m'=>1,'v'=>3});
+verbose = !switches["verb"].nil?
+minOverlap=switches['v'].to_i();
+mmPenalty=switches['m'].to_i();
+doRC = !switches['r'].nil?;
+outFP=switches['o'];
+logFP=switches['l'];
+if outFP.nil?
+	outFile=$stdout;
+else
+	outFile=File.open(outFP,"w");
+end
+if logFP.nil?
+	logFile=$stderr;
+else
+	logFile=File.open(logFP,"w");
+end
+
+def scoreAlign(k1,k2,mmPenalty,offset)
+	score=0;
+	if offset<0
+		temp=k1;
+		k1=k2;
+		k2=temp;
+		offset=-offset;
+	end
+	offset.upto([k1.length(),k2.length()+offset].min()-1){|i|
+		#print("[#{k1[i,1]},#{k2[i-offset,1]}] ");
+		if k1[i,1].nil? ||  k2[i-offset,1].nil? || k1[i,1]=="-" || k2[i-offset,1]=="-"
+		elsif k1[i,1]==k2[i-offset,1]
+			score+=1;
+		else
+			score-=mmPenalty;
+		end
+	}
+	#p([k1,k2,offset,score]);
+	return score;
+end
+
+def alignKMers(k1, k2,minOverlap, mmPenalty)
+	score=0;
+	offset=nil;
+	(minOverlap-k2.length()).upto(k1.length-minOverlap){|i|
+		curScore = scoreAlign(k1,k2,mmPenalty,i);
+		if curScore>score
+			score=curScore;
+			offset=i;
+		elsif curScore==score #there's a tie in the alignment
+			offset=nil;
+		end
+	}
+	return [score,offset];
+end
+
+class MotGroup
+	def initialize(str)
+		@consensus = str;
+		@allKMers = [str];
+	end
+	def revcomp!()
+		@consensus = revcomp(@consensus);
+		0.upto(@allKMers.length()-1){|i|
+			@allKMers[i] = revcomp(@allKMers[i]);
+		}
+	end
+	def expandLeft(n)
+		@consensus = "-"*n+@consensus;
+		@allKMers.map!(){|k| "-"*n+k};
+	end
+	def expandRight(n)
+		@consensus =@consensus+ "-"*n;
+		@allKMers.map!(){|k| k+"-"*n};
+	end
+	def deep_dup()
+		return Marshal.load(Marshal.dump(self));
+	end
+	def merge(motG,offset)
+		str=motG.getConsensus();
+		if offset<0
+			self.expandLeft(-offset);
+		elsif offset>0
+			motG.expandLeft(offset);
+		end
+		str=motG.getConsensus();
+
+		if str.length()>@consensus.length()
+			self.expandRight(str.length()-@consensus.length());
+		elsif str.length()<@consensus.length()
+			motG.expandRight(@consensus.length()-(str.length()));
+		end
+		motG.allKMers.each{|str|
+			@allKMers.push(str);
+		}
+		self.makeNewConsensus();
+	end
+	def makeNewConsensus()
+		len=@consensus.length();
+		@consensus=""
+		0.upto(len-1){|i|
+			opts=Hash.new();
+			0.upto(@allKMers.length()-1){|j|
+				if @allKMers[j][i,1]!="-"
+					if opts[@allKMers[j][i,1]].nil?
+						opts[@allKMers[j][i,1]]=0;
+					end
+					opts[@allKMers[j][i,1]]+=1;
+				end
+			}
+			maxNum=0
+			theMax="-";
+			opts.keys.each{|b|
+				if opts[b]>maxNum
+					maxNum=opts[b];
+					theMax=b;
+				end
+			}
+			@consensus+=theMax;
+		}
+	end
+
+	def getConsensus();
+		return @consensus;
+	end
+	def to_s()
+		s="consensus: #{@consensus}\n#{@allKMers.join("\n")}\n";
+	end
+	attr_accessor :allKMers;
+end
+
+inFP = switches['i'];
+grouped=[];
+File.foreach(inFP){|line|
+	line.chomp!();
+	next if line.nil? || line=="";
+	grouped.push(MotGroup.new(line));
+}
+changed=true;
+while(changed)
+	changed=false;
+	bestHitScore=[0]*grouped.length();
+	bestHitMatch=[nil]*grouped.length();
+	bestHitOffset=[nil]*grouped.length();
+	bestHitRC=[false]*grouped.length();
+
+	0.upto(grouped.length()-2){|j|
+		bestRC=false;
+		(j+1).upto(grouped.length()-1){|i|
+			score,offset = alignKMers(grouped[i].getConsensus(), grouped[j].getConsensus(), minOverlap, mmPenalty);
+			isRC=false
+			if doRC
+				scoreRC,offsetRC = alignKMers(grouped[i].getConsensus(), revcomp(grouped[j].getConsensus()), minOverlap, mmPenalty);
+				if scoreRC>score
+					score=scoreRC;
+					offset = offsetRC;
+					isRC=true;
+				end
+			end
+			if bestHitScore[i]<score && bestHitScore[j]<score # a superior pairing
+				p("New best for i=#{i}, j=#{j}, score=#{score} oldi=#{bestHitMatch[i]}, oldj=#{bestHitMatch[j]}, oldScorei=#{ bestHitScore[i]}, oldScorej=#{ bestHitScore[j]}") if verbose;
+				if doRC and isRC
+					bestHitRC[i]=true;
+				end
+				bestHitScore[i]=score;
+				bestHitScore[j]=score;
+				if offset.nil?
+					bestHitMatch[i]=nil;
+					bestHitMatch[j]=nil;
+				else
+					bestHitMatch[i]=j;
+					bestHitMatch[j]=i;
+					bestHitOffset[i]=offset;
+					bestHitOffset[j]=-offset;
+				end
+			elsif bestHitScore[i]<=score &&  bestHitScore[j]<=score # an equivalent pairing
+				if !offset.nil?
+					z=nil;
+					if bestHitScore[i]==score && !bestHitMatch[i].nil? #i has an equiv match, see if j still matches i and its match
+						tempX = grouped[i].deep_dup();
+						tempX.merge(grouped[bestHitMatch[i]].deep_dup(), bestHitOffset[i]);
+						p([tempX.getConsensus(),grouped[j].getConsensus()]) if verbose;
+						scoreM,offsetM = alignKMers(tempX.getConsensus(), grouped[j].getConsensus(), minOverlap, mmPenalty);
+						z=j;
+					elsif  bestHitScore[j]==score && !bestHitMatch[j].nil? #j has an equiv match, see if i still matches j and its pair combined
+						tempX = grouped[j].deep_dup();
+						tempX.merge(grouped[bestHitMatch[j]].deep_dup(), bestHitOffset[j]);
+						p([tempX.getConsensus(),grouped[i].getConsensus()]) if verbose;
+						scoreM,offsetM = alignKMers(tempX.getConsensus(), grouped[i].getConsensus(), minOverlap, mmPenalty);
+						z=i;
+					end
+				end
+					
+				if !offset.nil? && !z.nil? && scoreM>=score#special case where x<->y<->z; pairing of j to merge(i,best[i]) is still good, so they can be merged without penalty
+					#go with the first one, so don't nil anything, leave as is
+					p("Special case tie for i=#{i}, j=#{j}, score=#{score} oldi=#{bestHitMatch[i]}, oldj=#{bestHitMatch[j]} - tossing #{z}") if verbose;
+					bestHitMatch[z]=nil;
+					bestHitScore[z]=score;
+				else # merging i and best[i] destroys the alignment of i and j
+					p("Tie for both i=#{i}, j=#{j}, score=#{score} oldi=#{bestHitMatch[i]}, oldj=#{bestHitMatch[j]}") if verbose;
+					bestHitScore[i]=score;
+					bestHitScore[j]=score;
+					bestHitMatch[i]=nil;
+					bestHitMatch[j]=nil;
+				end
+			elsif bestHitScore[j]<=score #tie for j, worse for i
+				p("Tie with i=#{i}, j=#{j}, score=#{score} oldj=#{bestHitMatch[j]}") if verbose;
+				bestHitScore[j]=score;
+				bestHitMatch[j]=nil;
+			elsif bestHitScore[i]<=score #tie for i, worse for j
+				p("Tie with i=#{i}, j=#{j}, score=#{score} oldi=#{bestHitMatch[i]}") if verbose;
+				bestHitScore[i]=score;
+				bestHitMatch[i]=nil;
+			end
+		}
+	}
+	p(bestHitScore) if verbose;
+	p(bestHitMatch) if verbose;
+	p(bestHitOffset) if verbose;
+	j=0;
+	while (j<grouped.length())
+		if !bestHitMatch[j].nil? && !bestHitMatch[bestHitMatch[j]].nil? && bestHitScore[j]>=minOverlap && bestHitMatch[bestHitMatch[j]]==j
+			#i and j match, are mutual best hits, and overlap by the required amount
+			i=bestHitMatch[j];
+			if bestHitRC[i] # offset is already relative to the RC
+				grouped[i].revcomp!()
+			end
+			raise("ERROR: RC state of both oligos is not the same") if bestHitRC[i]!=bestHitRC[j];
+			raise("ERROR: not self pointing: i=#{i}=>#{bestHitMatch[i]} j=#{j}=>#{i}") if bestHitMatch[i]!=j;
+			raise("ERROR: i<=j: i=#{i} j=#{j}") if i<=j;
+			changed=true;
+			p("Merging #{grouped[j].getConsensus()} and #{grouped[i].getConsensus()}") if verbose;
+			grouped[j].merge(grouped[i], bestHitOffset[j]);
+			grouped[i]=nil;
+			bestHitOffset[i]=nil;
+			bestHitMatch[i]=nil;
+			bestHitScore[i]=nil;
+			bestHitOffset[j]=nil;
+			bestHitMatch[j]=nil;
+			bestHitScore[j]=nil;
+		else
+			j=j+1;
+		end
+	end
+	(grouped.length()-1).downto(0){|i|
+		if grouped[i].nil?
+			grouped.delete_at(i);
+		end
+	}
+end
+
+grouped.each(){|g|
+	outFile.print(g.to_s());
+}
+
