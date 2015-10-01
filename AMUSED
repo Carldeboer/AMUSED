@@ -19,11 +19,12 @@ if ARGV.length()<NUMARGV  || ARGV[0]=~/^--?[h?]/ #TODO: clean
 	print("  -nu = no changing to upper case before scan (non ATGC bases are discarded)\n");
 	print("  -ds = double stranded (reverse complement sequences too)\n");
 	print("  -ns = don't sort\n");
+	print("  -bc = add lines to output for base content\n");
 	print("  -nsz = don't calculate super Zs\n");
 	exit;
 end
 
-switches = parseSwitches(ARGV,{"s"=>1,'z'=>1,'o'=>1,'q'=>1,'b'=>1,'ds'=>1,'bp'=>1,'nsz'=>0,'ng'=>0,'t'=>1, '1p'=>0,'ns'=>0, 'nu'=>0});
+switches = parseSwitches(ARGV,{"s"=>1,'z'=>1,'o'=>1,'q'=>1,'b'=>1,'ds'=>1,'bp'=>1,'nsz'=>0,'ng'=>0,'t'=>1, '1p'=>0,'ns'=>0, 'nu'=>0, 'bc'=>0});
 switches=getDefaults(switches,{"s"=>8,'z'=>0,'bp'=>'0.5','t'=>"1"});
 numThreads = switches['t'].to_i();
 numThreads = [numThreads,1].max();
@@ -39,6 +40,7 @@ isFasta=switches['1p'].nil?
 noSort = !switches['ns'].nil?
 toUpper = switches['nu'].nil?
 superZ=switches['nsz'].nil?();
+addBC = !switches['bc'].nil?();
 minSubZ = switches['z'].to_i();
 if superZ
 	superZ=1;
@@ -107,7 +109,7 @@ header=[];
 header.push("k","kMer", "kMerRC", "Num_FG", "Size_FG","Pct_FG"); #general headers
 header.push("SubEnr_FG","SubDepl_FG","SubZ_FG"); # Z-score 
 if useBG
-	I_Num_BG= headerI+0; I_Size_BG = headerI+1; I_PctBG = headerI+2; I_SubEnr_BG = headerI+3; I_SubDepl_BG = headerI+4; I_SubZ_BG = headerI+5; I_SubEnr_Rel=headerI+6; I_SubDepl_Rel = headerI+7; I_SubZ_Rel = headerI + 8; headerI = headerI+9;
+	I_Num_BG= headerI+0; I_Size_BG = headerI+1; I_Pct_BG = headerI+2; I_SubEnr_BG = headerI+3; I_SubDepl_BG = headerI+4; I_SubZ_BG = headerI+5; I_SubEnr_Rel=headerI+6; I_SubDepl_Rel = headerI+7; I_SubZ_Rel = headerI + 8; headerI = headerI+9;
 	header.push("Num_BG","Size_BG","Pct_BG","SubEnr_BG","SubDepl_BG","SubZ_BG", "SubEnr_Rel","SubDepl_Rel","SubZ_Rel"); # with background
 end
 if superZ==1
@@ -209,11 +211,37 @@ end
 
 print("Calculating statistics... \n");
 #puts Benchmark.measure(){
-allData = [];
-indexHash={};
+allData = []; 
 if doubleStranded
 	didThese ={};
 end
+if addBC # include one line for the base content with only the relevant fields filled out
+	ntContent.each{|b,n|
+		curKMerData=[0] * headerI; #initialize to 0s
+		curKMerData[I_K]=1;
+		curKMerData[I_SEQ]=b;
+		curKMerData[I_RC]=revcomp(b)
+		#calc frequency as percent
+		if (doubleStranded)
+			next if (!didThese[b].nil?);
+			didThese[revcomp(b)]=1;
+		end
+		curKMerData[I_Num_FG]=n
+		curKMerData[I_Size_FG] = seqTotLen;
+		curKMerData[I_Pct_FG] =100*ntHash[b];
+		if useBG
+			ntContentBG.each{|b2,n2|
+				if b2==b
+					curKMerData[I_Num_BG]=n2
+				end
+			}
+			curKMerData[I_Size_BG] = bgTotLen;
+			curKMerData[I_Pct_BG] =100*ntHashBG[b];
+		end
+		allData.push(curKMerData);
+	}
+end
+
 nextI=0;
 refNum=0;
 2.upto(maxTreeSize){|k|
@@ -313,7 +341,7 @@ refNum=0;
 			e2b=ntHash[n2]*gapCountBG[s2];# same for s2
 			raise("bgNMer and seqNMer are not the same! "+bgNMer+" "+seqNMer+" i="+i.to_s()) if bgNMer!=seqNMer;
 			curKMerData[I_Num_BG]=bgHits;
-			curKMerData[I_PctBG]=(100.0*bgHits)/allKMerTotalsBG[k];
+			curKMerData[I_Pct_BG]=(100.0*bgHits)/allKMerTotalsBG[k];
 			curKMerData[I_Size_BG]=allKMerTotalsBG[k];
 			eMaxb=[e1b*subLenCorrBG1,e2b*subLenCorrBG2].max(); # expected count in background, if submotifs enriched
 			dMinb=[e1b*subLenCorrBG1,e2b*subLenCorrBG2].min(); # expected count in background, if submotifs depleted
