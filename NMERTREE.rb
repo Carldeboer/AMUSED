@@ -7,6 +7,55 @@ class NMerTreeHash
 			enumerateKMers(@alphabet, i).each{|mer| @seqHashes[mer]=0};
 		}
 	end
+	def traverseSeqs(seqFile)
+		seqTotLen=0;
+		seqCount  =0;
+		prevSeq = "";
+		while curSeq = seqFile.nextPart()
+			if curSeq=="\n"#done with the last seq
+				traverse(prevSeq);
+				seqCount+=1;
+				prevSeq ="";
+			else
+				curSeqs = curSeq.split(/[^ATGC]+/);
+				while curSeqs.length()>1
+					curSeq = curSeqs.shift();
+					seqTotLen+=curSeq.length();
+					traverse(prevSeq + curSeq);
+					prevSeq = "";
+					# because there is a break, count this as a new sequence.
+					seqCount+=1;
+				end
+				curSeq = curSeqs.shift();
+				if curSeq.nil?
+					traverse(prevSeq) if !prevSeq.nil?
+					prevSeq = "";
+				else
+					seqTotLen+=curSeq.length();
+					curSeq = prevSeq+curSeq;
+					partialTraverse(curSeq)
+					if curSeq.length >= @maxTreeSize-1
+						prevSeq = curSeq[curSeq.length()-@maxTreeSize+1,@maxTreeSize-1];
+					else
+						prevSeq = curSeq;
+					end
+				end
+			end
+		end
+		if prevSeq!=""
+			traverse(prevSeq);
+			seqCount+=1;
+		end
+		return [seqCount, seqTotLen];
+	end
+	def partialTraverse(seq)
+		#print(seq)
+		1.upto(@maxTreeSize){|i| # for each k mer
+			0.upto(seq.length()-@maxTreeSize){|j| # for each starting position
+				@seqHashes[seq[j,i]]+=1;
+			}
+		}
+	end
 	def traverse(seq)
 		1.upto(@maxTreeSize){|i| # for each k mer
 			0.upto(seq.length()-i){|j| # for each starting position
@@ -24,8 +73,8 @@ class NMerTreeHash
 			if k.length==i
 				retMe.push(k);
 			end
-			}
-			return retMe
+		}
+		return retMe
 	end
 	def [](k)
 		return @seqHashes[k];
@@ -81,9 +130,10 @@ def revcomp(sequence)
 end
 
 class SeqReader
-	def initialize(file, isFasta)
+	def initialize(file, isFasta, toUpper)
 		@file=file;
 		@isFasta = isFasta;
+		@toUpper = toUpper;
 		if @isFasta
 			line = @file.gets();
 			if line[0,1]==">"
@@ -93,17 +143,48 @@ class SeqReader
 			end
 		end
 	end
+	def processSeq(seq)
+		if @toUpper
+			return seq.upcase();
+		else
+			return seq;
+		end
+	end
 	def nextFA()
 		curSeq = ""
 		while line = @file.gets()
 			if line[0,1]==">"
-				return curSeq;
+				return processSeq(curSeq);
 			else
 				curSeq+=line.chomp();
 			end
 		end
 		@hasNext=false;
-		return curSeq;
+		return processSeq(curSeq);
+	end
+	#return the next sequence part (e.g. line of a fasta file), or "\n" if at the end of the sequence, or nil if at EOF
+	def nextPart()
+		if @isFasta
+			line= @file.gets();
+			if line.nil?
+				return nil;
+			elsif line[0,1]==">"
+				@hasNext=true;
+				return "\n";
+			else
+				return processSeq(line.chomp());
+			end
+		else
+			if @halfPart
+				@halfPart=false;
+				return "\n";
+			else
+				line = @file.gets();
+				@halfPart=true;
+				return nil if line.nil?; #EOF
+				return processSeq(line.chomp());
+			end
+		end
 	end
 	def next()
 		if @isFasta
@@ -114,8 +195,8 @@ class SeqReader
 			end
 		else
 			line = @file.gets();
-			return line if line.nil?;
-			return line.chomp();
+			return nil if line.nil?;
+			return processSeq(line.chomp());
 		end
 	end
 end
@@ -171,9 +252,8 @@ class NMerTree
 	def clear()
 		@rootNode = NMTNode.new();
 	end
-
-
 end
+
 class NMTNode
 	attr_accessor :hits, :children;
 	def initialize()

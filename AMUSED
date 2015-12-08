@@ -52,44 +52,23 @@ alphabet = ["A","T","G","C"];
 if useBG
 	print("Scanning background sequences\n");
 	gapCountBG = NMerTreeHash.new(maxTreeSize+superZ,alphabet);
+	bgCount=0;
 	bgTotLen=0;
-	bgCount  =0;
 	t1 = Thread.new{
-		bgSR =SeqReader.new(smartGZIn(bgInFP,"r"),isFasta);
-		while curSeq = bgSR.next()
-			curSeq.upcase!() if toUpper;
-			curSeqs = curSeq.split(/[^ATGC]+/); #fragment the sequence into different seqs separated by non-ATGC characters
-			curSeqs.each(){|curSeq|
-				next if curSeq=="";
-				gapCountBG.traverse(curSeq); # traverse the current sequence
-				gapCountBG.traverse(revcomp(curSeq)) if doubleStranded;
-				bgTotLen+=curSeq.length
-				bgCount+=1;
-			}
-		end
+		bgSR =SeqReader.new(smartGZIn(bgInFP,"r"),isFasta, toUpper);
+		bgCount, bgTotLen = gapCountBG.traverseSeqs(bgSR);
+		#print("bgTotLen = " + bgTotLen.to_s()+"\n");
 	}
 	if (numThreads==1)
 		t1.join();
 	end
 end
-
 #initialize foreground
 print("Scanning foreground sequences\n");
 gapCountFG =NMerTreeHash.new(maxTreeSize+superZ,alphabet);
-fgSR =SeqReader.new(smartGZIn(fgInFP,"r"),isFasta);
-seqTotLen=0;
-seqCount = 0;
-while curSeq= fgSR.next()
-	curSeq.upcase!() if toUpper;
-	curSeqs = curSeq.split(/[^ATGC]/); #fragment the sequence into different seqs separated by non-ATGC characters
-	curSeqs.each(){|curSeq|
-		next if curSeq=="";
-		gapCountFG.traverse(curSeq); #scan the current sequence
-		gapCountFG.traverse(revcomp(curSeq)) if doubleStranded;
-		seqTotLen+=curSeq.length
-		seqCount+=1;
-	}
-end
+fgSR =SeqReader.new(smartGZIn(fgInFP,"r"),isFasta, toUpper);
+seqCount, seqTotLen = gapCountFG.traverseSeqs(fgSR);
+#print("seqCount = " + seqCount.to_s()+"\n");
 if useBG
 	t1.join()
 end
@@ -130,16 +109,26 @@ ntContent=gapCountFG.getAllNMers(1,alphabet);
 if doubleStranded
 	seqTotLen+=seqTotLen;
 	bgTotLen+=bgTotLen if useBG;
+	seqCount+=seqCount;
+	bgCount+=bgCount if useBG;
 end
 ntHash=Hash.new();
 ntContent.each{|b,n|
-	ntHash[b]=(0.0+n)/seqTotLen;
+	if doubleStranded
+		ntHash[b]=(0.0+n+gapCountFG[revcomp(b)])/seqTotLen;
+	else
+		ntHash[b]=(0.0+n)/seqTotLen;
+	end
 }
 if superZ==1 && useBG
 	ntContentBG=gapCountBG.getAllNMers(1,alphabet);
 	ntHashBG=Hash.new();
 	ntContentBG.each{|b,n|
-		ntHashBG[b]=(0.0+n)/bgTotLen;
+		if doubleStranded
+			ntHashBG[b]=(0.0+n+gapCountBG[revcomp(b)])/bgTotLen;
+		else
+			ntHashBG[b]=(0.0+n)/bgTotLen;
+		end
 	}
 end
 allKMerTotalsFG=[];
@@ -229,11 +218,12 @@ refNum=0;
 		curKMerData=[];
 		curKMerData[I_K]=k;
 		seqNMer=curFGDist[i]
+		seqHits = gapCountFG[seqNMer];
 		if (doubleStranded)
 			next if (!didThese[seqNMer].nil?);
+			seqHits += gapCountFG[revcomp(seqNMer)];
 			didThese[revcomp(seqNMer)]=1;
 		end
-		seqHits = gapCountFG[seqNMer];
 		curKMerData[I_SEQ]=seqNMer;
 		curKMerData[I_RC]=revcomp(seqNMer)
 		curKMerData[I_Num_FG]=seqHits;
@@ -263,9 +253,13 @@ refNum=0;
 			#although using s1.length instead of k-1 for the /allKMerTotalsBG index might seem to make sense, we actually are pretending this has terminal gaps and so k-1 should be used here too
 		#puts("s1: "+s1+"\n");
 		begin
-		e1=ntHash[n1]*gapCountFG[s1];#expected frequency of cur k-mer, given s1 frequency and n1
-		#puts("s2: "+s2+"\n");
-		e2=ntHash[n2]*gapCountFG[s2];# expected frequency of cur k-mer, given s2 frequency and n2
+		if doubleStranded
+			e1=ntHash[n1]*(gapCountFG[s1]) + ntHash[revcomp(n1)]*gapCountFG[revcomp(s1)];#expected frequency of cur k-mer, given s1 frequency and n1
+			e2=ntHash[n2]*(gapCountFG[s2]) + ntHash[revcomp(n2)]*gapCountFG[revcomp(s2)];# expected frequency of cur k-mer, given s2 frequency and n2
+		else
+			e1=ntHash[n1]*(gapCountFG[s1]);#expected frequency of cur k-mer, given s1 frequency and n1
+			e2=ntHash[n2]*(gapCountFG[s2]);# expected frequency of cur k-mer, given s2 frequency and n2
+		end
 		rescue Exception => e
 			puts s1
 			puts s2
@@ -308,9 +302,15 @@ refNum=0;
 			}
 			bgNMer = curBGDist[i];
 			bgHits = gapCountBG[bgNMer];
-			#although using s1.length instead of k-1 for the /allKMerTotalsBG index might seem to make sense, we actually are pretending this has terminal gaps and so k-1 should be used here too
-			e1b=ntHash[n1]*gapCountBG[s1];#expected freq of (k-1)-mer in BG, using sub-motif s1
-			e2b=ntHash[n2]*gapCountBG[s2];# same for s2
+			if (doubleStranded)
+				bgHits += gapCountBG[revcomp(bgNMer)];
+				e1b=ntHashBG[n1]*(gapCountBG[s1]) + ntHashBG[revcomp(n1)]*gapCountBG[revcomp(s1)];#expected freq of (k-1)-mer in BG, using sub-motif s1
+				e2b=ntHashBG[n2]*(gapCountBG[s2]) + ntHashBG[revcomp(n2)]*gapCountBG[revcomp(s2)];# same for s2
+			else
+				#although using s1.length instead of k-1 for the /allKMerTotalsBG index might seem to make sense, we actually are pretending this has terminal gaps and so k-1 should be used here too
+				e1b=ntHashBG[n1]*(gapCountBG[s1]);#expected freq of (k-1)-mer in BG, using sub-motif s1
+				e2b=ntHashBG[n2]*(gapCountBG[s2]);# same for s2
+			end
 			raise("bgNMer and seqNMer are not the same! "+bgNMer+" "+seqNMer+" i="+i.to_s()) if bgNMer!=seqNMer;
 			curKMerData[I_Num_BG]=bgHits;
 			curKMerData[I_PctBG]=(100.0*bgHits)/allKMerTotalsBG[k];
@@ -522,7 +522,7 @@ else
 	end
 end
 print("Printing results...\n");
-outFile = File.open(outFP, "w");
+outFile = smartGZOut(outFP, "w");
 outFile.print(header.join("\t")+"\n");
 0.upto(allData.length-1){|i|
 	curEntry = allData[i]
