@@ -49,7 +49,7 @@ def scoreAlign(k1,k2,mmPenalty,offset)
 			score-=mmPenalty;
 		end
 	}
-	#p([k1,k2,offset,score]);
+	#logFile.print([k1,k2,offset,score,"\n"]);
 	return score;
 end
 
@@ -163,7 +163,6 @@ while(changed)
 	bestHitRC=[false]*grouped.length();
 
 	0.upto(grouped.length()-2){|j|
-		bestRC=false;
 		(j+1).upto(grouped.length()-1){|i|
 			score,offset = alignKMers(grouped[i].getConsensus(), grouped[j].getConsensus(), minOverlap, mmPenalty); #offsets are relative to the first sequence
 			isRC=false
@@ -176,12 +175,12 @@ while(changed)
 				end
 			end
 			if bestHitScore[i]<score && bestHitScore[j]<score # a superior pairing
-				p("New best for i=#{i}, j=#{j}, score=#{score} oldi=#{bestHitMatch[i]}, oldj=#{bestHitMatch[j]}, oldScorei=#{ bestHitScore[i]}, oldScorej=#{ bestHitScore[j]}, consi=#{grouped[i].getConsensus()}, consj=#{grouped[j].getConsensus()}, RC=#{isRC.to_s}") if verbose;
+				logFile.print("New best for i=#{i}, j=#{j}, score=#{score} oldi=#{bestHitMatch[i]}, oldj=#{bestHitMatch[j]}, oldScorei=#{ bestHitScore[i]}, oldScorej=#{ bestHitScore[j]}, consi=#{grouped[i].getConsensus()}, consj=#{grouped[j].getConsensus()}, RC=#{isRC.to_s}") if verbose;
 				bestHitRC[i]= isRC;
 				bestHitRC[j]= isRC;
 				bestHitScore[i]=score;
 				bestHitScore[j]=score;
-				if offset.nil?
+				if offset.nil? # offset is nil if there are multiple equivalent ways of aligning the two or if there are no good alignments (score>0)
 					bestHitMatch[i]=nil;
 					bestHitMatch[j]=nil;
 				else
@@ -198,7 +197,7 @@ while(changed)
 						bestHitOffset[j]=-offset;
 					end
 				end
-			elsif bestHitScore[i]<=score &&  bestHitScore[j]<=score # an equivalent pairing
+			elsif bestHitScore[i]<=score &&  bestHitScore[j]<=score # an at least equivalent pairing for both
 				if !offset.nil?
 					qs = [i,j]; # allows me to test if both i and j have a beter match than this one using the same code
 					0.upto(1){|q|
@@ -206,10 +205,10 @@ while(changed)
 						qj=qs[1-q];
 						if bestHitScore[qi]==score && !bestHitMatch[qi].nil? #i has an equiv match, see if j still matches i and its match {
 							tempX = grouped[qi].deep_dup();
-							p("Test merging #{tempX.getConsensus()} with #{grouped[bestHitMatch[qi]].getConsensus()} at #{ bestHitOffset[qi]} for #{qi}") if verbose;
+							logFile.print("Test merging #{tempX.getConsensus()} with #{grouped[bestHitMatch[qi]].getConsensus()} at #{ bestHitOffset[qi]} for #{qi}") if verbose;
 							if bestHitRC[qi]
 								tempX.revcomp!()
-								p("... RC is #{tempX.getConsensus()}") if verbose;
+								logFile.print("... RC is #{tempX.getConsensus()}") if verbose;
 								scoreRCTest,offsetRCTest = alignKMers(tempX.getConsensus(), grouped[bestHitMatch[qi]].getConsensus(), minOverlap, mmPenalty);
 								if scoreRCTest!=score
 									raise("Managed to screw this up already");
@@ -220,21 +219,21 @@ while(changed)
 							else
 								tempX.merge(grouped[bestHitMatch[qi]].deep_dup(), bestHitOffset[qi]);
 							end
-							p("... got #{tempX.getConsensus()}") if verbose;
+							logFile.print("... got #{tempX.getConsensus()}") if verbose;
 							if isRC ^ bestHitRC[qi] #xor: if only one was RCed
-								p("... checking to see if alignment of #{tempX.getConsensus()} and #{revcomp(grouped[qj].getConsensus())} is still good (RC).") if verbose;
+								logFile.print("... checking to see if alignment of #{tempX.getConsensus()} and #{revcomp(grouped[qj].getConsensus())} is still good (RC).") if verbose;
 								scoreM,offsetM = alignKMers(tempX.getConsensus(), revcomp(grouped[qj].getConsensus()), minOverlap, mmPenalty);
 							else
-								p("... checking to see if alignment of #{tempX.getConsensus()} and #{grouped[qj].getConsensus()} is still good.") if verbose;
+								logFile.print("... checking to see if alignment of #{tempX.getConsensus()} and #{grouped[qj].getConsensus()} is still good.") if verbose;
 								scoreM,offsetM = alignKMers(tempX.getConsensus(), grouped[qj].getConsensus(), minOverlap, mmPenalty);
 							end
 							if scoreM>=score
-								p("Special case tie for m[i]<=>i<=>j, dropping i<=>j: i=#{qi}, j=#{qj}, score=#{score} oldi=#{bestHitMatch[qi]}, oldj=#{bestHitMatch[qj]}, oldScorei=#{bestHitScore[qi]}, oldScorej=#{bestHitScore[qj]}, consi=#{grouped[qi].getConsensus()}, consj=#{grouped[qj].getConsensus()}, isRC.to_s}") if verbose;
+								logFile.print("Special case tie for m[i]<=>i<=>j, dropping i<=>j: i=#{qi}, j=#{qj}, score=#{score} oldi=#{bestHitMatch[qi]}, oldj=#{bestHitMatch[qj]}, oldScorei=#{bestHitScore[qi]}, oldScorej=#{bestHitScore[qj]}, consi=#{grouped[qi].getConsensus()}, consj=#{grouped[qj].getConsensus()}, isRC.to_s}") if verbose;
 								#keep the original matching
 								bestHitMatch[qj]=nil;
 								bestHitScore[qj]=score; #hold this spot for the next round
 							else
-								p("i has a match, but joining them destroys match with j; dropping all: i=#{qi}, j=#{qj}, score=#{score} oldi=#{bestHitMatch[qi]}, oldj=#{bestHitMatch[qj]}, oldScorei=#{bestHitScore[qi]}, oldScorej=#{bestHitScore[qj]}, consi=#{grouped[qi].getConsensus()}, consj=#{grouped[qj].getConsensus()}, RC=#{isRC.to_s}") if verbose;
+								logFile.print("i has a match, but joining them destroys match with j; dropping all: i=#{qi}, j=#{qj}, score=#{score} oldi=#{bestHitMatch[qi]}, oldj=#{bestHitMatch[qj]}, oldScorei=#{bestHitScore[qi]}, oldScorej=#{bestHitScore[qj]}, consi=#{grouped[qi].getConsensus()}, consj=#{grouped[qj].getConsensus()}, RC=#{isRC.to_s}") if verbose;
 								bestHitScore[qi]=score;
 								bestHitScore[qj]=score;
 								bestHitMatch[qi]=nil;
@@ -244,39 +243,39 @@ while(changed)
 					}
 				end
 			elsif bestHitScore[j]<=score #tie for j, worse for i
-				p("Tie with j=#{j}, worse for i=#{i}, score=#{score} oldj=#{bestHitMatch[j]}, oldscorei=#{bestHitScore[i]}") if verbose;
+				logFile.print("Tie with j=#{j}, worse for i=#{i}, score=#{score} oldj=#{bestHitMatch[j]}, oldscorei=#{bestHitScore[i]}") if verbose;
 				bestHitScore[j]=score;
 				bestHitMatch[j]=nil;
 			elsif bestHitScore[i]<=score #tie for i, worse for j
-				p("Tie with i=#{i}, worse for j=#{j}, score=#{score} oldi=#{bestHitMatch[i]}, oldscorej=#{bestHitScore[j]}") if verbose;
+				logFile.print("Tie with i=#{i}, worse for j=#{j}, score=#{score} oldi=#{bestHitMatch[i]}, oldscorej=#{bestHitScore[j]}") if verbose;
 				bestHitScore[i]=score;
 				bestHitMatch[i]=nil;
 			end
 		}
 	}
-	p(bestHitScore) if verbose;
-	p(bestHitMatch) if verbose;
-	p(bestHitOffset) if verbose;
-	p(bestHitRC) if verbose;
+	logFile.print("bestHitScore="+bestHitScore.join("\t")+"\n") if verbose;
+	logFile.print("bestHitMatch="+bestHitMatch.join("\t")+"\n") if verbose;
+	logFile.print("bestHitOffset="+bestHitOffset.join("\t")+"\n") if verbose;
+	logFile.print("bestHitRC="+bestHitRC.join("\t")+"\n") if verbose;
 	j=0;
 	while (j<grouped.length())
 		if !bestHitMatch[j].nil? && !bestHitMatch[bestHitMatch[j]].nil? && bestHitScore[j]>=minOverlap && bestHitMatch[bestHitMatch[j]]==j
 			#i and j match, are mutual best hits, and overlap by the required amount
 			i=bestHitMatch[j];
-			p("Proposed merger #{j.to_s}:#{grouped[j].getConsensus()}-#{bestHitRC[j].to_s} and #{i.to_s}:#{grouped[i].getConsensus()}-#{bestHitRC[i].to_s} with an offset of #{bestHitOffset[j].to_s}") if verbose;
+			logFile.print("Proposed merger #{j.to_s}:#{grouped[j].getConsensus()}-#{bestHitRC[j].to_s} and #{i.to_s}:#{grouped[i].getConsensus()}-#{bestHitRC[i].to_s} with an offset of #{bestHitOffset[j].to_s}") if verbose;
 			if bestHitRC[j] # offset is already relative to the RC
-				p("RCing #{grouped[j].getConsensus()}") if verbose;
+				logFile.print("RCing #{grouped[j].getConsensus()}") if verbose;
 				grouped[j].revcomp!()
-				p("... to get #{grouped[j].getConsensus()}") if verbose;
+				logFile.print("... to get #{grouped[j].getConsensus()}") if verbose;
 				#bestHitOffset[j] = -bestHitOffset[j];
 			end
 			raise("ERROR: not self pointing: i=#{i}=>#{bestHitMatch[i]} j=#{j}=>#{i}") if bestHitMatch[i]!=j;
 			raise("ERROR: RC state of both oligos is not the same for #{i.to_s()}:#{grouped[i].getConsensus()}-#{bestHitRC[i].to_s()} and #{j.to_s()}:#{grouped[j].getConsensus()}-#{bestHitRC[j].to_s()}") if bestHitRC[i]!=bestHitRC[j];
 			raise("ERROR: i<=j: i=#{i} j=#{j}") if i<=j;
 			changed=true;
-			p("Merging #{j.to_s}:#{grouped[j].getConsensus()} and #{i.to_s}:#{grouped[i].getConsensus()} with an offset of #{bestHitOffset[j].to_s}") if verbose;
+			logFile.print("Merging #{j.to_s}:#{grouped[j].getConsensus()} and #{i.to_s}:#{grouped[i].getConsensus()} with an offset of #{bestHitOffset[j].to_s}") if verbose;
 			grouped[j].merge(grouped[i], bestHitOffset[j]);
-			p("Yielded #{grouped[j].getConsensus()}") if verbose;
+			logFile.print("Yielded #{grouped[j].getConsensus()}") if verbose;
 			grouped[i]=nil;
 			bestHitOffset[i]=nil;
 			bestHitMatch[i]=nil;
@@ -295,6 +294,7 @@ while(changed)
 	}
 end
 
+grouped.sort!(){|a,b| b.allKMers.length() <=> a.allKMers.length()};
 grouped.each(){|g|
 	outFile.print(g.to_s());
 }
