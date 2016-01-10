@@ -91,9 +91,9 @@ header.push("k","kMer", "kMerRC", "Num_FG", "Size_FG","Pct_FG"); #general header
 header.push("SubEnr_FG","SubDepl_FG","SubZ_FG"); # Z-score 
 outputThese = [I_SEQ, I_RC, I_Pct_FG]
 if useBG
-	I_Num_BG= headerI+0; I_Size_BG = headerI+1; I_Pct_BG = headerI+2; I_SubEnr_BG = headerI+3; I_SubDepl_BG = headerI+4; I_SubZ_BG = headerI+5; I_SubEnr_Rel=headerI+6; I_SubDepl_Rel = headerI+7; I_SubZ_Rel = headerI + 8; headerI = headerI+9;
-	outputThese.push(I_Pct_BG, I_SubZ_Rel);
-	header.push("Num_BG","Size_BG","Pct_BG","SubEnr_BG","SubDepl_BG","SubZ_BG", "SubEnr_Rel","SubDepl_Rel","SubZ_Rel"); # with background
+	I_Num_BG= headerI+0; I_Size_BG = headerI+1; I_Pct_BG = headerI+2; I_logOR = headerI+3; I_SubEnr_BG = headerI+4; I_SubDepl_BG = headerI+5; I_SubZ_BG = headerI+6; I_SubEnr_Rel=headerI+7; I_SubDepl_Rel = headerI+8; I_SubZ_Rel = headerI + 9; headerI = headerI+10;
+	outputThese.push(I_Pct_BG, I_logOR, I_SubZ_Rel);
+	header.push("Num_BG","Size_BG","Pct_BG", "logOR","SubEnr_BG","SubDepl_BG","SubZ_BG", "SubEnr_Rel","SubDepl_Rel","SubZ_Rel"); # with background
 else
 	outputThese.push(I_SubZ_FG);
 end
@@ -294,8 +294,8 @@ refNum=0;
 		#puts("s1: "+s1+"\n");
 		begin
 		if doubleStranded
-			e1=ntHash[n1]*(gapCountFG[s1]) + ntHash[revcomp(n1)]*gapCountFG[revcomp(s1)];#expected frequency of cur k-mer, given s1 frequency and n1
-			e2=ntHash[n2]*(gapCountFG[s2]) + ntHash[revcomp(n2)]*gapCountFG[revcomp(s2)];# expected frequency of cur k-mer, given s2 frequency and n2
+			e1=ntHash[n1]*(gapCountFG[s1] + gapCountFG[revcomp(s1)]);#expected frequency of cur k-mer, given s1 frequency and n1
+			e2=ntHash[n2]*(gapCountFG[s2] + gapCountFG[revcomp(s2)]);# expected frequency of cur k-mer, given s2 frequency and n2
 		else
 			e1=ntHash[n1]*(gapCountFG[s1]);#expected frequency of cur k-mer, given s1 frequency and n1
 			e2=ntHash[n2]*(gapCountFG[s2]);# expected frequency of cur k-mer, given s2 frequency and n2
@@ -344,8 +344,8 @@ refNum=0;
 			bgHits = gapCountBG[bgNMer];
 			if (doubleStranded)
 				bgHits += gapCountBG[revcomp(bgNMer)];
-				e1b=ntHashBG[n1]*(gapCountBG[s1]) + ntHashBG[revcomp(n1)]*gapCountBG[revcomp(s1)];#expected freq of (k-1)-mer in BG, using sub-motif s1
-				e2b=ntHashBG[n2]*(gapCountBG[s2]) + ntHashBG[revcomp(n2)]*gapCountBG[revcomp(s2)];# same for s2
+				e1b=ntHashBG[n1]*(gapCountBG[s1] + gapCountBG[revcomp(s1)]);#expected freq of (k-1)-mer in BG, using sub-motif s1
+				e2b=ntHashBG[n2]*(gapCountBG[s2]+ gapCountBG[revcomp(s2)]);# same for s2
 			else
 				#although using s1.length instead of k-1 for the /allKMerTotalsBG index might seem to make sense, we actually are pretending this has terminal gaps and so k-1 should be used here too
 				e1b=ntHashBG[n1]*(gapCountBG[s1]);#expected freq of (k-1)-mer in BG, using sub-motif s1
@@ -354,6 +354,7 @@ refNum=0;
 			raise("bgNMer and seqNMer are not the same! "+bgNMer+" "+seqNMer+" i="+i.to_s()) if bgNMer!=seqNMer;
 			curKMerData[I_Num_BG]=bgHits;
 			curKMerData[I_Pct_BG]=(100.0*bgHits)/allKMerTotalsBG[k];
+			curKMerData[I_logOR] = Math.log(((seqHits+0.5)/allKMerTotalsFG[k])/((bgHits+0.5)/allKMerTotalsBG[k]))/Math.log(2)
 			curKMerData[I_Size_BG]=allKMerTotalsBG[k];
 			eMaxb=[e1b*subLenCorrBG1,e2b*subLenCorrBG2].max(); # expected count in background, if submotifs enriched
 			dMinb=[e1b*subLenCorrBG1,e2b*subLenCorrBG2].min(); # expected count in background, if submotifs depleted
@@ -415,76 +416,105 @@ refNum=0;
 			curKMerData[I_SubZ_Rel]=(normZScore);
 		end #}
 		if superZ==1 #{
-			supZmax=0.0;
-			supZmin=0.0;
 			if seqHits==0 # if no instances of this motif, there can be no super motifs
 				curKMerData[I_SuperZ_FG]=0.0;
-			else
+			else #{
+				curSuperZsFG = Hash.new(); # a hash containing all possible super z scores - when there is a background being used, which one of these that is used will also depend on the superZsBG
 				alphabet.each{|b| 
 					curExp=(0.0+seqHits)*ntHash[b]; #calculate most enriched and most depleted (k+1)-mer Z score given k-mer
 					if curExp>0
-						supZmax=[supZmax, (0.0+gapCountFG[seqNMer+b]-curExp)/Math.sqrt(curExp),(0.0+gapCountFG[b+seqNMer]-curExp)/Math.sqrt(curExp)].max();
-						supZmin=[supZmin, (0.0+gapCountFG[seqNMer+b]-curExp)/Math.sqrt(curExp),(0.0+gapCountFG[b+seqNMer]-curExp)/Math.sqrt(curExp)].min();
+						if (doubleStranded)
+							curSuperZsFG[seqNMer+b] = (0.0+ (gapCountFG[seqNMer+b] + gapCountFG[revcomp(seqNMer+b)]) - curExp)/Math.sqrt(curExp);
+							curSuperZsFG[b+seqNMer] = (0.0+ (gapCountFG[b+seqNMer] + gapCountFG[revcomp(b+seqNMer)]) - curExp)/Math.sqrt(curExp);
+						else
+							curSuperZsFG[seqNMer+b] = (0.0+ gapCountFG[seqNMer+b] - curExp)/Math.sqrt(curExp);
+							curSuperZsFG[b+seqNMer] = (0.0+ gapCountFG[b+seqNMer] - curExp)/Math.sqrt(curExp);
+						end
+						
 						if addGaps # add a base of information to the middle
 							1.upto(seqNMer.length()-2){|gp|
 								if seqNMer[gp,1]=="-"
-									supZmax=[supZmax, (0.0+gapCountFG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]]-curExp)/Math.sqrt(curExp)].max();
-									supZmin=[supZmin, (0.0+gapCountFG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]]-curExp)/Math.sqrt(curExp)].min();
+									if (doubleStranded)
+										curSuperZsFG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]] = (0.0+gapCountFG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]] + gapCountFG[revcomp(seqNMer[0,gp]+b+seqNMer[gp+1..-1])] - curExp)/Math.sqrt(curExp);
+									else
+										curSuperZsFG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]] = (0.0+gapCountFG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]] - curExp)/Math.sqrt(curExp);
+									end
 								end
 							}
 						end
 					end
 				}
-				if justZScore>0 # if k-mer is enriched
-					curKMerData[I_SuperZ_FG]=(supZmax); #use enrichment
-				elsif justZScore<0 # if k-mer depleted
-					curKMerData[I_SuperZ_FG]=(supZmin); # use depletion
+				supZmaxFG = 0.0;
+				supZminFG = 0.0;
+				curSuperZsFG.keys().each(){|w|
+					supZminFG = [supZminFG, curSuperZsFG[w]].min();
+					supZmaxFG = [supZmaxFG, curSuperZsFG[w]].max();
+				}
+				if justZScore>0 # if k-mer is enriched in FG
+					curKMerData[I_SuperZ_FG]=(supZmaxFG); #use enrichment
+				elsif justZScore<0 # if k-mer depleted in FG
+					curKMerData[I_SuperZ_FG]=(supZminFG); # use depletion
 				else # neither enriched nor depleted.
 					curKMerData[I_SuperZ_FG]=0.0;
 				end
-			end
+			end#}
 			curKMerData[I_DeltaZ_FG]= (curKMerData[I_SubZ_FG]).abs()-(curKMerData[I_SuperZ_FG]).abs();
 			if useBG #superZ with background {
 				if bgHits==0 #{
 					curKMerData[I_SuperZ_BG]=0.0;
 				else #}{
+					curSuperZsBG = Hash.new();
 					supZmax=0.0;
 					supZmin=0.0;
 					alphabet.each{|b| #calc BG super Z
 						curExp=(0.0+bgHits)*ntHashBG[b];
 						if curExp>0
-							supZmax=[supZmax, (0.0+gapCountBG[seqNMer+b]-curExp)/Math.sqrt(curExp),(0.0+gapCountBG[b+seqNMer]-curExp)/Math.sqrt(curExp)].max();
-							supZmin=[supZmin, (0.0+gapCountBG[seqNMer+b]-curExp)/Math.sqrt(curExp),(0.0+gapCountBG[b+seqNMer]-curExp)/Math.sqrt(curExp)].min();
-						end
-						if addGaps # add a base of information to the middle
-							1.upto(seqNMer.length()-2){|gp|
-								if seqNMer[gp,1]=="-"
-									supZmax=[supZmax, (0.0+gapCountBG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]]-curExp)/Math.sqrt(curExp)].max();
-									supZmin=[supZmin, (0.0+gapCountBG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]]-curExp)/Math.sqrt(curExp)].min();
-								end
-							}
+							if (doubleStranded)
+								curSuperZsBG[seqNMer+b] = (0.0+ (gapCountBG[seqNMer+b] + gapCountBG[revcomp(seqNMer+b)]) - curExp)/Math.sqrt(curExp);
+								curSuperZsBG[b+seqNMer] = (0.0+ (gapCountBG[b+seqNMer] + gapCountBG[revcomp(b+seqNMer)]) - curExp)/Math.sqrt(curExp);
+							else
+								curSuperZsBG[seqNMer+b] = (0.0+ gapCountBG[seqNMer+b] - curExp)/Math.sqrt(curExp);
+								curSuperZsBG[b+seqNMer] = (0.0+ gapCountBG[b+seqNMer] - curExp)/Math.sqrt(curExp);
+							end
+							if addGaps # add a base of information to the middle
+								1.upto(seqNMer.length()-2){|gp|
+									if seqNMer[gp,1]=="-"
+										if (doubleStranded)
+											curSuperZsBG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]] = (0.0+gapCountBG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]] + gapCountBG[revcomp(seqNMer[0,gp]+b+seqNMer[gp+1..-1])] - curExp)/Math.sqrt(curExp);
+										else
+											curSuperZsBG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]] = (0.0+gapCountBG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]] - curExp)/Math.sqrt(curExp);
+										end
+									end
+								}
+							end
 						end
 					}
-					if justZScore>0 # k-mer in FG is enriched
-						curKMerData[I_SuperZ_BG] = (supZmax);
-					elsif justZScore<0 #depleted
-						curKMerData[I_SuperZ_BG] = (supZmin);
+					supZmaxBG = 0.0;
+					supZminBG = 0.0;
+					curSuperZsBG.keys().each(){|w|
+						supZminBG = [supZminBG, curSuperZsBG[w]].min();
+						supZmaxBG = [supZmaxBG, curSuperZsBG[w]].max();
+					}
+					if curKMerData[I_SubZ_BG]>0 # if k-mer is enriched in BG
+						curKMerData[I_SuperZ_BG]=(supZmaxBG); #use enrichment
+					elsif curKMerData[I_SubZ_BG]<0 # if k-mer depleted in BG
+						curKMerData[I_SuperZ_BG]=(supZminBG); # use depletion
 					else # neither enriched nor depleted.
-						curKMerData[I_SuperZ_BG] = 0.0;
+						curKMerData[I_SuperZ_BG]=0.0;
 					end
-				end #}
+				end #} end if bgHits==0
+				#now use the two hashes to calculate the super z score given both FG and BG
 				if seqHits==0 #no hits in the FG {
 					curKMerData[I_SuperZ_Rel] = 0.0; # because we expect no supermotifs containing this motif in FG.
 				elsif bgHits==0 # no hits in BG #}{
 					curKMerData[I_SuperZ_Rel] = 0.0; # because we expect no supermotifs containing this motif in BG - nothing to compare to.
 				else #}{
-					supZmax=0.0;
-					supZmin=0.0;
+					curSuperZsRel=Hash.new();
 					alphabet.each{|b|
 						curExpBG=(0.0+bgHits)*ntHashBG[b];
 						curExpSeq=(0.0+seqHits)*ntHash[b];
 						if curExpBG!=0 && curExpSeq!=0 # if either is 0, there is a 0 in the %nt hash, so skip it #{
-							if curExpBG>curExpSeq
+							if curExpBG>curExpSeq # scale data to the smaller num expected
 								scaleBG= curExpSeq/curExpBG;
 								scaleFG = 1;
 								denom = Math.sqrt(curExpSeq);
@@ -496,24 +526,38 @@ refNum=0;
 							denom=1.0 if denom==0;
 							#((Oq-Eq)*cq-(Obg-Ebg)*cbg)/sqrt(min(Eq,Ebg))
 #							begin
-							supZmax=[supZmax, ((0.0+gapCountFG[seqNMer+b]-curExpSeq)*scaleFG-(0.0+gapCountBG[seqNMer+b]-curExpBG)*scaleBG)/denom,((0.0+gapCountFG[b+seqNMer]-curExpSeq)*scaleFG-(0.0+gapCountBG[b+seqNMer]-curExpBG)*scaleBG)/denom].max();
-							supZmin=[supZmin, ((0.0+gapCountFG[seqNMer+b]-curExpSeq)*scaleFG-(0.0+gapCountBG[seqNMer+b]-curExpBG)*scaleBG)/denom,((0.0+gapCountFG[b+seqNMer]-curExpSeq)*scaleFG-(0.0+gapCountBG[b+seqNMer]-curExpBG)*scaleBG)/denom].min();
+							if (doubleStranded)
+								curSuperZsRel[seqNMer+b] = ((0.0+gapCountFG[seqNMer+b] + gapCountFG[revcomp(seqNMer+b)] - curExpSeq) * scaleFG - (0.0+gapCountBG[seqNMer+b] + gapCountBG[revcomp(seqNMer+b)] - curExpBG)*scaleBG)/denom
+								curSuperZsRel[b+seqNMer] = ((0.0+gapCountFG[b+seqNMer] + gapCountFG[revcomp(b+seqNMer)] - curExpSeq) * scaleFG - (0.0+gapCountBG[b+seqNMer] + gapCountBG[revcomp(b+seqNMer)] - curExpBG)*scaleBG)/denom
+							else
+								curSuperZsRel[seqNMer+b] = ((0.0+gapCountFG[seqNMer+b]-curExpSeq)*scaleFG-(0.0+gapCountBG[seqNMer+b]-curExpBG)*scaleBG)/denom
+								curSuperZsRel[b+seqNMer] = ((0.0+gapCountFG[b+seqNMer]-curExpSeq)*scaleFG-(0.0+gapCountBG[b+seqNMer]-curExpBG)*scaleBG)/denom
+							end
 							if addGaps # add a base of information to the middle
 								1.upto(seqNMer.length()-2){|gp|
 									if seqNMer[gp,1]=="-"
-										supZmax=[supZmax, ((0.0+gapCountFG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]]-curExpSeq)*scaleFG-(0.0+gapCountBG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]]-curExpBG)*scaleBG)/denom].max();
-										supZmin=[supZmin, ((0.0+gapCountFG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]]-curExpSeq)*scaleFG-(0.0+gapCountBG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]]-curExpBG)*scaleBG)/denom].min();
+										if (doubleStranded)
+											curSuperZsRel[seqNMer[0,gp]+b+seqNMer[gp+1..-1]] = ((0.0+gapCountFG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]] + gapCountFG[revcomp(seqNMer[0,gp]+b+seqNMer[gp+1..-1])] -curExpSeq) * scaleFG - (0.0+gapCountBG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]] + gapCountBG[revcomp(seqNMer[0,gp]+b+seqNMer[gp+1..-1])] - curExpBG) * scaleBG)/denom
+										else
+											curSuperZsRel[seqNMer[0,gp]+b+seqNMer[gp+1..-1]] = ((0.0+gapCountFG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]]-curExpSeq)*scaleFG-(0.0+gapCountBG[seqNMer[0,gp]+b+seqNMer[gp+1..-1]]-curExpBG)*scaleBG)/denom
+										end
 									end
 								}
 							end
 						end #}
 					}
-					if normZScore>0 # if normalized Z score is enriched
-						curKMerData[I_SuperZ_Rel] = (supZmax);
-					elsif normZScore<0 # if normalized Z-score is depleted
-						curKMerData[I_SuperZ_Rel] = (supZmin);
+					supZmaxRel = 0.0;
+					supZminRel = 0.0;
+					curSuperZsRel.keys().each(){|w|
+						supZminRel = [supZminRel, curSuperZsRel[w]].min();
+						supZmaxRel = [supZmaxRel, curSuperZsRel[w]].max();
+					}
+					if normZScore>0 # if k-mer is relatively enriched in FG
+						curKMerData[I_SuperZ_Rel]=(supZmaxRel); #use enrichment
+					elsif normZScore<0 # if k-mer relatively depleted in FG
+						curKMerData[I_SuperZ_Rel]=(supZminRel); # use depletion
 					else # neither enriched nor depleted.
-						curKMerData[I_SuperZ_Rel] = 0.0
+						curKMerData[I_SuperZ_Rel]=0.0;
 					end
 				end #}
 				curKMerData[I_DeltaZ_Rel]=(curKMerData[I_SubZ_Rel]).abs()-(curKMerData[I_SuperZ_Rel]).abs()
