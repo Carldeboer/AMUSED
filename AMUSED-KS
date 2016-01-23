@@ -3,23 +3,26 @@ require "MATHS.rb"
 require "NMERTREE.rb"
 require "UTILS.rb";
 require "SWITCHES.rb"
+require "GZ.rb"
 NUMARGV=4;
 if ARGV.length()<NUMARGV  || ARGV[0]=~/^--?[h?]/
 	print("Usage: AMUSED-KS -q <inFPQuery>  -o <outFP> [-b <backgroundSeqs>] [-s <maxTreeSize>] [-m <smoothBy>] [-t <numThreads] [-p] [-1p]\n");
 	print("  -q <inFPQuery> = query sequences\n");
 	print("  -b <inFPBG> = compare seqs to these background seqs\n");
 	print("  -o <outFP> = output file\n");
-	print("  -s <maxTreeSize> = max n-mer to consider [default=6]\n");
+	print("  -s <maxTreeSize> = max n-mer to consider [default=8]\n");
 	print("  -m <smoothBy> = smooth data over how many bases to generate expected distribution for one-sample KS test (when no background set is included) [default=5]\n");
 	print("  -t <numThreads> = number of CPU threads to use [default=1]\n");
 #	print("  -p = calculate K-S p values\n");
+	print("  -ds = double stranded (reverse complement sequences too)\n");
 	print("  -1p = sequences not in fasta format: each line is a full sequence\n");
+	print("  -nu = no changing to upper case before scan (non ATGC bases are discarded)\n");
 	exit;
 end
 
 #maxTreeSize=5;
-switches = parseSwitches(ARGV,{"s"=>1,'o'=>1,'q'=>1,'m'=>1,'1p'=>0,'t'=>1,'b'=>1,'p'=>0,'1p'=>0});
-switches=getDefaults(switches,{"s"=>6,"m"=>5,'t'=>1});
+switches = parseSwitches(ARGV,{"s"=>1,'o'=>1,'q'=>1,'m'=>1,'1p'=>0,'t'=>1,'b'=>1,'p'=>0,'1p'=>0, 'nu'=>0, 'ds'=>0});
+switches=getDefaults(switches,{"s"=>8,"m"=>5,'t'=>1});
 maxTreeSize=switches['s'].to_f();
 smoothBy=switches["m"].to_i();
 numThreads=switches["t"].to_i();
@@ -27,7 +30,9 @@ numThreads = [numThreads,1].max();
 seqInFP = switches['q'];
 useBG = !switches['b'].nil?;
 isFasta = switches['1p'].nil?;
+doubleStranded=!switches['ds'].nil?
 calcPValues = !switches['p'].nil?;
+toUpper = switches['nu'].nil?
 if useBG
 	bgInFP = switches['b'];
 end
@@ -40,7 +45,7 @@ print("Inputing All Data...\n")
 theLen=nil;
 seqTotLen=0;
 seqCount = 0;
-fgSR =SeqReader.new(open(seqInFP,"r"),isFasta);
+fgSR =SeqReader.new(open(seqInFP,"r"),isFasta, toUpper);
 curSeq = fgSR.next();
 raise("First sequence in fg is nil!") if curSeq.nil?
 theLen=curSeq.length();
@@ -51,6 +56,10 @@ t1 = Thread.new{
 		raise(sprintf("Not all sequences in FG are the same length as FG at seq #%i!",seqCount+1)) if curSeq.length()!=theLen;
 		fgKDist.traverse(curSeq);
 		seqCount+=1;
+		#if doubleStranded
+		#	fgKDist.traverse(revcomp(curSeq));
+		#	seqCount+=1;
+		#end
 	end
 }
 if numThreads==1
@@ -66,6 +75,10 @@ if useBG
 		raise(sprintf("Not all sequences in BG are the same length as FG at seq #%i!",bgCount+1)) if curSeq.length()!=theLen;
 		bgKDist.traverse(curSeq);
 		bgCount+=1;
+		#if doubleStranded
+		#	bgKDist.traverse(revcomp(curSeq));
+		#	bgCount+=1;
+		#end
 	end
 	t1.join() # need this to complete before making expectation
 else # make bg from smoothed fg
@@ -99,14 +112,26 @@ if calcPValues
 	header.push("KS-P");
 end
 print("Calculating statistics...\n")
-fgKDist.keys.each{|k|
+if doubleStranded
+	didThese ={};
+end
+fgKDist.keys.sort().each{|k|
 	curData = [0.0]*numEntries;
 	curData[I_K] = k.length(); curData[I_SEQ] = k; curData[I_RC] = revcomp(k);
 	cdfFG =[0.0]*theLen;
-	cdfFG[0]+=fgKDist[k][1].to_f();
-	1.upto(theLen-1){|i|
-		cdfFG[i]+=cdfFG[i-1]+fgKDist[k][i];
-	}
+	if (doubleStranded)
+		next if (!didThese[k].nil?);
+		didThese[revcomp(k)]=1;
+		cdfFG[0]+=fgKDist[curData[I_RC]][1].to_f() + fgKDist[k][1].to_f();
+		1.upto(theLen-1){|i|
+			cdfFG[i]+=cdfFG[i-1]+fgKDist[curData[I_RC]][i] + fgKDist[k][i];
+		}
+	else
+		cdfFG[0]+=fgKDist[k][1].to_f();
+		1.upto(theLen-1){|i|
+			cdfFG[i]+=cdfFG[i-1]+fgKDist[k][i];
+		}
+	end
 	countFG=cdfFG[theLen-1];
 	curData[I_NumFG]=countFG;
 	if countFG==0 # no observences - no statistics
@@ -116,10 +141,17 @@ fgKDist.keys.each{|k|
 	cdfFG.map!(){|e|  e/countFG; }; # to frequencies
 	cdfBG =[0.0]*theLen;
 	if useBG
-		cdfBG[0]+=bgKDist[k][1].to_f();
-		1.upto(theLen-1){|i|
-			cdfBG[i]+=cdfBG[i-1]+bgKDist[k][i];
-		}
+		if (doubleStranded)
+			cdfBG[0]+=bgKDist[curData[I_RC]][1].to_f() + bgKDist[k][1].to_f();
+			1.upto(theLen-1){|i|
+				cdfBG[i]+=cdfBG[i-1]+bgKDist[curData[I_RC]][i] + bgKDist[k][i];
+			}
+		else
+			cdfBG[0]+=bgKDist[k][1].to_f();
+			1.upto(theLen-1){|i|
+				cdfBG[i]+=cdfBG[i-1]+bgKDist[k][i];
+			}
+		end
 		countBG=cdfBG[theLen-1];
 		curData[I_NumBG]=countBG;
 		if countBG==0 # no observences - no statistics
@@ -132,7 +164,11 @@ fgKDist.keys.each{|k|
 		curF=[1.0]*theLen; #calculate frequencies expected by BG
 		0.upto(theLen-k.length()){|i|
 			0.upto(k.length()-1){|j|
-				curF[i]=curF[i]*baseFreqs[k[j,1]][i+j];
+				if doubleStranded
+					curF[i]=curF[i]*(baseFreqs[k[j,1]][i+j] + baseFreqs[revcomp(k[j,1])][i+j])/2;
+				else
+					curF[i]=curF[i]*baseFreqs[k[j,1]][i+j];
+				end
 			}
 		}
 		(theLen-k.length()+1).upto(theLen-1){|i| #add 0s to the end since k=8-mers cannot be observed at end-7 or later
@@ -206,7 +242,7 @@ if calcPValues
 end
 
 print("Printing results...\n");
-outFile=File.open(outFP,"w");
+outFile = smartGZOut(outFP, "w");
 outFile.print(header.join("\t")+"\n");
 0.upto(allData.length()-1){|i|
 	outFile.print(allData[i].map(){|e| e.to_s()}.join("\t")+"\n");
