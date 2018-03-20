@@ -1,4 +1,4 @@
-#!/usr/bin/ruby
+#!/usr/bin/env ruby
 require "DNATOOLBOX.rb"
 require "HOME.rb"
 inFP=ARGV[0];
