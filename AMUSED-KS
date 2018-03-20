@@ -1,4 +1,4 @@
-#!/usr/bin/ruby
+#!/usr/bin/env ruby
 require "MATHS.rb"
 require "NMERTREE.rb"
 require "UTILS.rb";
