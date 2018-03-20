@@ -1,4 +1,4 @@
-#!/usr/bin/ruby
+#!/usr/bin/env ruby
 require "DNATOOLBOX.rb"
 NUMARGV=2;
 if ARGV.length()<NUMARGV  || ARGV[0]=~/^--?[h?]/
