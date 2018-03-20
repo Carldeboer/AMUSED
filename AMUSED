@@ -1,4 +1,4 @@
-#!/usr/bin/ruby
+#!/usr/bin/env ruby
 require "NMERTREE.rb"
 require "UTILS.rb";
 require "SWITCHES.rb"
